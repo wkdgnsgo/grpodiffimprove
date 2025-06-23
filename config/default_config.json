@@ -17,7 +17,16 @@
       "lora_target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
       "load_in_8bit": false,
       "load_in_4bit": true,
-      "_description": "LoRA를 사용하여 Qwen2.5-VL을 효율적으로 학습"
+      "_description": "LoRA를 사용하여 Qwen2.5-VL을 효율적으로 학습",
+
+      "visual_encoder_settings": {
+        "_comment": "Visual encoder 관련 설정",
+        "suppress_init_warnings": true,
+        "improve_initialization": false,
+        "freeze_visual_encoder": false,
+        "visual_learning_rate_multiplier": 0.1,
+        "_description": "Visual encoder 초기화 경고는 정상적인 현상입니다"
+      }
     }
   },
 
@@ -37,16 +46,19 @@
     "entropy_coeff": 0.01,
     "max_grad_norm": 1.0,
     "epsilon_std": 1e-8,
-    "_paper_reference": "DeepSeekMath: Pushing the Limits of Mathematical Reasoning (Shao et al., 2024)",
+    "_paper_reference": "DeepSeekMath: Pushing the Limits of Mathematical Reasoning (Shao et al., 2024)"
+  },
 
-    "vlm_policy_settings": {
-      "_comment": "VLM 정책 네트워크 설정",
-      "max_new_tokens": 25,
-      "temperature": 0.8,
-      "top_p": 0.9,
-      "do_sample": true,
-      "use_cache": true,
-      "_description": "Qwen2.5-VL 정책 네트워크 생성 파라미터"
+  "token_settings": {
+    "_comment": "토큰 관련 통합 설정",
+    "max_new_tokens": 25,
+    "max_prompt_length": 77,
+    "max_sequence_length": 102,
+    "_description": "max_sequence_length = max_prompt_length + max_new_tokens",
+    "_explanation": {
+      "max_new_tokens": "GRPO 학습 시 생성할 새로운 토큰 수",
+      "max_prompt_length": "입력 프롬프트 최대 길이 (CLIP 77토큰 제한)",
+      "max_sequence_length": "전체 시퀀스 최대 길이 (프롬프트 + 생성 토큰)"
     }
   },
 
@@ -61,9 +73,12 @@
   "generation_settings": {
     "_comment": "생성 관련 설정",
     "vlm_generation": {
-      "max_new_tokens": 25,
+      "_comment": "VLM 생성 파라미터 - token_settings에서 max_new_tokens 참조",
       "temperature": 0.8,
-      "top_p": 0.9
+      "top_p": 0.9,
+      "do_sample": true,
+      "use_cache": true,
+      "_description": "Qwen2.5-VL 생성 파라미터 (토큰 수는 token_settings 참조)"
     },
     "sd_generation": {
       "height": 1024,

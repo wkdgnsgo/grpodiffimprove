@@ -174,9 +174,7 @@ class VLMGRPOSystem:
             self.vlm_policy: VLMWrapper = VLMWrapper(
                 config_path=self.config_path,
                 device=self.config['system_settings']['device'],
-                max_new_tokens=self.config['generation_settings']['vlm_generation']['max_new_tokens'],
-                temperature=self.config['generation_settings']['vlm_generation']['temperature'],
-                top_p=self.config['generation_settings']['vlm_generation']['top_p']
+                max_token_length=self.config['token_settings']['max_prompt_length']
             )
             logger.info(f"✅ VLM Policy Network initialized: {self.vlm_policy.model_name}")
             
@@ -218,7 +216,7 @@ class VLMGRPOSystem:
                 clip_epsilon=self.config['training_settings']['clip_epsilon'],
                 entropy_coeff=self.config['training_settings']['entropy_coeff'],
                 max_grad_norm=self.config['training_settings']['max_grad_norm'],
-                max_new_tokens=self.config['generation_settings']['vlm_generation']['max_new_tokens'],
+                max_new_tokens=self.config['token_settings']['max_new_tokens'],
                 temperature=self.config['generation_settings']['vlm_generation']['temperature'],
                 device=self.config['system_settings']['device']
             )

@@ -49,10 +49,11 @@ class GRPOConfig:
     max_grad_norm: float = 1.0    # 그래디언트 클리핑
     epsilon_std: float = 1e-8     # 표준편차 정규화용 엡실론
     
-    # 토큰 생성 파라미터
+    # 토큰 생성 파라미터 (config에서 로드됨)
     max_new_tokens: int = 25      # 최대 생성 토큰 수
-    vocab_size: int = 50000       # 어휘 크기
-    max_sequence_length: int = 100 # 최대 시퀀스 길이
+    max_prompt_length: int = 77   # 최대 프롬프트 길이 (CLIP 제한)
+    max_sequence_length: int = 102 # 최대 시퀀스 길이 (prompt + new_tokens)
+    vocab_size: int = 50000       # 어휘 크기 (모델에서 자동 설정)
     temperature: float = 0.8
     
     # 디바이스 설정
