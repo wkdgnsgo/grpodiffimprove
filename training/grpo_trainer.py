@@ -3,13 +3,14 @@ GRPO (Group Relative Policy Optimization) Trainer
 ================================================
 
 GRPO 알고리즘을 구현한 핵심 학습 모듈입니다.
-VLM 프롬프트 개선을 위한 강화학습 트레이너입니다.
+Qwen2.5-VL 자체를 정책 네트워크로 사용하여 프롬프트 개선을 학습합니다.
 
 주요 기능:
-1. GRPO 정책 업데이트
-2. 그룹 기반 어드밴티지 계산
-3. KL 발산 페널티
-4. 참조 모델 관리
+1. Qwen2.5-VL을 직접 정책 네트워크로 사용
+2. GRPO 정책 업데이트
+3. 그룹 기반 어드밴티지 계산
+4. KL 발산 페널티
+5. 참조 모델 관리
 
 GRPO vs PPO 차이점:
 - PPO: 개별 샘플 기반 어드밴티지
@@ -28,7 +29,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
 import logging
-from transformers import AutoTokenizer
+import copy
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -37,19 +38,19 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GRPOConfig:
     """GRPO 학습 설정 클래스"""
-    learning_rate: float = 1e-5
+    learning_rate: float = 5e-6
     group_size: int = 4
-    num_iterations: int = 20
-    grpo_epochs: int = 2
+    num_iterations: int = 100
+    grpo_epochs: int = 3
     gamma: float = 0.99           # 할인 팩터
-    kl_beta: float = 0.01         # KL 발산 페널티 계수
+    kl_beta: float = 0.02         # KL 발산 페널티 계수
     clip_epsilon: float = 0.2     # 클리핑 범위
     entropy_coeff: float = 0.01   # 엔트로피 보너스 계수
     max_grad_norm: float = 1.0    # 그래디언트 클리핑
     epsilon_std: float = 1e-8     # 표준편차 정규화용 엡실론
     
     # 토큰 생성 파라미터
-    max_new_tokens: int = 20      # 최대 생성 토큰 수
+    max_new_tokens: int = 25      # 최대 생성 토큰 수
     vocab_size: int = 50000       # 어휘 크기
     max_sequence_length: int = 100 # 최대 시퀀스 길이
     temperature: float = 0.8
@@ -57,109 +58,47 @@ class GRPOConfig:
     # 디바이스 설정
     device: str = "auto"
 
-class TokenPolicyNetwork(nn.Module):
-    """토큰별 정책 네트워크 - 다음 토큰을 선택하는 모델"""
-    
-    def __init__(self, vocab_size: int = 50000, embed_dim: int = 256, hidden_dim: int = 512):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.embed_dim = embed_dim
-        
-        # 토큰 임베딩
-        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
-        self.position_embedding = nn.Embedding(100, embed_dim)  # 최대 100 토큰
-        
-        # 트랜스포머 레이어
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=embed_dim,
-                nhead=8,
-                dim_feedforward=hidden_dim,
-                dropout=0.1,
-                batch_first=True
-            ),
-            num_layers=4
-        )
-        
-        # 출력 헤드
-        self.output_head = nn.Linear(embed_dim, vocab_size)
-        
-    def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
-        """
-        Args:
-            input_ids: [batch_size, seq_len] - 토큰 ID 시퀀스
-            attention_mask: [batch_size, seq_len] - 어텐션 마스크
-            
-        Returns:
-            Categorical: 다음 토큰에 대한 확률 분포
-        """
-        batch_size, seq_len = input_ids.shape
-        
-        # 입력 토큰 ID 범위 검증 및 클리핑
-        input_ids = torch.clamp(input_ids, 0, self.vocab_size - 1)
-        
-        # 위치 임베딩 범위 검증
-        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-        positions = torch.clamp(positions, 0, 99)  # position_embedding 최대 크기 99
-        
-        # 토큰 + 위치 임베딩
-        token_embeds = self.token_embedding(input_ids)
-        pos_embeds = self.position_embedding(positions)
-        
-        # 임베딩 합성
-        embeddings = token_embeds + pos_embeds
-        
-        # 트랜스포머 처리
-        if attention_mask is not None:
-            # 패딩 마스크 생성 (True = 마스킹)
-            padding_mask = (attention_mask == 0)
-        else:
-            padding_mask = None
-        
-        transformer_output = self.transformer(embeddings, src_key_padding_mask=padding_mask)
-        
-        # 마지막 토큰의 출력을 사용하여 다음 토큰 예측
-        last_token_output = transformer_output[:, -1, :]  # [batch_size, embed_dim]
-        logits = self.output_head(last_token_output)      # [batch_size, vocab_size]
-        
-        # 확률 분포 반환
-        return Categorical(logits=logits)
-
 class GRPOTrainer:
-    """토큰별 순차 생성 기반 GRPO 트레이너"""
+    """Qwen2.5-VL을 직접 정책 네트워크로 사용하는 GRPO 트레이너"""
     
     def __init__(self, vlm_model, sd_generator, clip_reward, config: GRPOConfig):
-        self.vlm = vlm_model
+        """
+        GRPO Trainer 초기화
+        
+        Args:
+            vlm_model: VLMWrapper 인스턴스 (Qwen2.5-VL 포함)
+            sd_generator: SD3 생성기 (동결됨)
+            clip_reward: CLIP 보상 계산기 (동결됨)
+            config: GRPO 설정
+        """
+        # --- Core Components ---
+        self.vlm_policy = vlm_model  # VLM이 곧 정책 네트워크
         self.sd_generator = sd_generator  # 동결된 SD3 파이프라인
         self.clip_reward = clip_reward    # 동결된 CLIP 보상 모델
         self.config = config
         
-        # 디바이스 설정
+        # --- Device Setup ---
         if config.device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(config.device)
         
-                # 토크나이저 초기화
-        self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        # --- VLM Policy Network Validation ---
+        if not hasattr(self.vlm_policy, 'model') or self.vlm_policy.model is None:
+            raise ValueError("VLM model is not loaded. Please ensure VLMWrapper has loaded Qwen2.5-VL model.")
         
-        # vocab_size 안전하게 설정
+        # --- Tokenizer Setup ---
+        self.tokenizer = self.vlm_policy.tokenizer
         self.vocab_size = len(self.tokenizer)
-        logger.info(f"📝 Tokenizer vocab size: {self.vocab_size}")
-            
-        # 정책 네트워크 초기화
-        self.policy_network = TokenPolicyNetwork(
-            vocab_size=self.vocab_size,
-            embed_dim=256,
-            hidden_dim=512
-        ).to(self.device)
         
-        # 옵티마이저
-        self.optimizer = optim.Adam(self.policy_network.parameters(), lr=config.learning_rate)
+        # --- Reference Policy Network (Copy of current VLM) ---
+        self.vlm_policy_ref = None
+        self._create_reference_policy()
         
-        # 학습 통계
+        # --- Optimizer for VLM Policy ---
+        self.vlm_optimizer = optim.Adam(self.vlm_policy.model.parameters(), lr=config.learning_rate)
+        
+        # --- Training Statistics ---
         self.training_stats = {
             'iteration': 0,
             'total_samples': 0,
@@ -169,281 +108,417 @@ class GRPOTrainer:
             'kl_div': 0.0
         }
         
+        # --- Lists for Logging/Plotting ---
+        self.iteration_rewards = []
+        self.iteration_policy_losses = []
+        self.iteration_entropies = []
+        self.iteration_kl_divs = []
+        
         logger.info(f"🚀 GRPO Trainer initialized with device: {self.device}")
-        logger.info(f"📊 Policy network parameters: {sum(p.numel() for p in self.policy_network.parameters())}")
-        logger.info(f"📝 Tokenizer vocab size: {len(self.tokenizer)}")
+        logger.info(f"📊 VLM policy parameters: {sum(p.numel() for p in self.vlm_policy.model.parameters()):,}")
+        logger.info(f"📝 Vocab size: {self.vocab_size}")
     
-    def collect_group_data(self, prompts: List[str]) -> Dict[str, Any]:
+    def _create_reference_policy(self):
+        """참조 정책 생성 (현재 VLM의 deepcopy)"""
+        try:
+            logger.info("📋 Creating reference policy from current VLM...")
+            
+            # 참조 정책은 VLM 모델의 완전한 복사본
+            self.vlm_policy_ref = copy.deepcopy(self.vlm_policy.model)
+            self.vlm_policy_ref.eval()
+            
+            # 참조 정책의 그래디언트 비활성화
+            for param in self.vlm_policy_ref.parameters():
+                param.requires_grad = False
+            
+            logger.info("✅ Reference policy created and frozen")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create reference policy: {e}")
+            self.vlm_policy_ref = None
+    
+    def collect_group_trajectories(self, prompts: List[str]) -> Dict[str, Any]:
         """
-        그룹 데이터 수집 - 토큰별 순차 생성 방식
+        그룹 궤적 수집 - VLM 정책을 사용한 토큰별 순차 생성
         
         각 프롬프트에 대해:
-        1. 토큰별로 순차 생성
+        1. VLM으로 토큰별 순차 생성 (rollout)
         2. 각 스텝에서 state = user_prompt + 지금까지_생성된_토큰들
         3. action = 다음_토큰_선택
         4. 완성된 프롬프트로 이미지 생성 및 보상 계산
         """
-        logger.info(f"🔄 Collecting group data for {len(prompts)} prompts...")
+        logger.info(f"🔄 Collecting group trajectories for {len(prompts)} prompts...")
         
-        group_data = {
-            'original_prompts': [],
-            'generated_sequences': [],  # 생성된 전체 시퀀스
-            'states': [],              # 각 스텝의 상태
-            'actions': [],             # 각 스텝의 액션 (토큰)
-            'log_probs_old': [],       # 각 스텝의 로그 확률
-            'rewards': [],             # 각 시퀀스의 최종 보상
-            'episode_lengths': []      # 각 에피소드 길이
-        }
+        # --- Group Data Storage ---
+        group_states_list: List[torch.Tensor] = []
+        group_actions_list: List[torch.Tensor] = []
+        group_log_probs_old_list: List[torch.Tensor] = []
+        group_rewards_list: List[List[float]] = []
         
-        self.policy_network.eval()
+        episode_rewards_in_iter = []
+        episode_lengths_in_iter = []
         
-        for prompt in prompts:
-            logger.debug(f"📝 Processing prompt: '{prompt[:50]}...'")
+        # --- Set VLM Policy to Evaluation Mode for Rollout ---
+        self.vlm_policy.model.eval()
+        
+        for rollout_idx, prompt in enumerate(prompts):
+            logger.debug(f"📝 Processing rollout {rollout_idx+1}/{len(prompts)}: '{prompt[:50]}...'")
             
-            # 1. 프롬프트 토크나이징
-            initial_tokens = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+            # --- Single Rollout Data ---
+            rollout_states: List[torch.Tensor] = []
+            rollout_actions: List[torch.Tensor] = []
+            rollout_log_probs: List[torch.Tensor] = []
+            rollout_rewards: List[float] = []
             
-            # 토큰 ID 범위 안전성 검증
-            initial_tokens = torch.clamp(initial_tokens, 0, self.vocab_size - 1)
-            logger.debug(f"Initial tokens: {initial_tokens}, max_token: {initial_tokens.max().item()}, vocab_size: {self.vocab_size}")
-            
-            # 2. 토큰별 순차 생성
-            episode_states = []
-            episode_actions = []
-            episode_log_probs = []
-            
-            current_sequence = initial_tokens.clone()
-            
-            with torch.no_grad():
-                for step in range(self.config.max_new_tokens):
-                    # 현재 상태: user_prompt + 지금까지_생성된_토큰들
-                    current_state = current_sequence.clone()
-                    
-                    # 정책 네트워크로 다음 토큰 분포 계산
-                    policy_dist = self.policy_network(current_sequence)
-                    
-                    # 다음 토큰 샘플링
-                    next_token = policy_dist.sample()
-                    
-                    # 토큰 ID 범위 검증 및 클리핑
-                    next_token = torch.clamp(next_token, 0, self.vocab_size - 1)
-                    
-                    log_prob = policy_dist.log_prob(next_token)
-                    
-                    # 디버깅: 차원 및 범위 확인
-                    logger.debug(f"current_sequence shape: {current_sequence.shape}")
-                    logger.debug(f"next_token shape: {next_token.shape}")
-                    logger.debug(f"next_token value: {next_token.item()}, vocab_size: {self.vocab_size}")
-                    
-                    # 데이터 저장
-                    episode_states.append(current_state.squeeze())
-                    episode_actions.append(next_token)
-                    episode_log_probs.append(log_prob)
-                    
-                    # 시퀀스 업데이트 (차원 맞춤)
-                    # current_sequence: [1, seq_len], next_token을 [1, 1]로 만들어서 concat
-                    if next_token.dim() == 0:  # 스칼라인 경우
-                        next_token_expanded = next_token.unsqueeze(0).unsqueeze(0)  # [1, 1]
-                    elif next_token.dim() == 1:  # [batch_size]인 경우
-                        next_token_expanded = next_token.unsqueeze(1)  # [batch_size, 1]
-                    else:
-                        next_token_expanded = next_token
-                    
-                    logger.debug(f"next_token_expanded shape: {next_token_expanded.shape}")
-                    current_sequence = torch.cat([current_sequence, next_token_expanded], dim=1)
-                    
-                    # EOS 토큰이면 중단
-                    if next_token.item() == self.tokenizer.eos_token_id:
-                        break
-            
-            # 3. 생성된 프롬프트 디코딩
-            generated_sequence = current_sequence.squeeze()
-            generated_text = self.tokenizer.decode(generated_sequence, skip_special_tokens=True)
-            
-            # 4. 환경 실행: 동결된 텍스트→이미지 파이프라인
             try:
-                # SD3로 이미지 생성
-                generated_image = self.sd_generator.generate_image(generated_text)
-                
-                # CLIP으로 보상 계산
-                reward = self.clip_reward.calculate_reward(
-                    image=generated_image,
-                    text=generated_text
+                # --- VLM Sequential Generation (Token-by-token) ---
+                generation_result = self.vlm_policy.generate_sequence(
+                    prompt=prompt,
+                    max_new_tokens=self.config.max_new_tokens
                 )
+                
+                generated_text = generation_result['generated_text']
+                states = generation_result['states']  # List of state tensors
+                actions = generation_result['actions']  # List of action tensors
+                log_probs = generation_result['log_probs']  # List of log_prob tensors
+                
+                # --- Environment Interaction: Text→Image→Reward ---
+                try:
+                    # SD3로 이미지 생성
+                    generated_image = self.sd_generator.generate_image(generated_text)
+                    
+                    # CLIP으로 보상 계산
+                    final_reward = self.clip_reward.calculate_reward(
+                        image=generated_image,
+                        text=generated_text
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Image generation/reward failed: {e}")
+                    final_reward = 0.0
+                
+                # --- Store Rollout Data ---
+                if states and actions and log_probs:
+                    # 각 스텝에 동일한 최종 보상 할당 (할인 적용 예정)
+                    step_rewards = [final_reward] * len(states)
+                    
+                    rollout_states = states
+                    rollout_actions = actions
+                    rollout_log_probs = log_probs
+                    rollout_rewards = step_rewards
+                    
+                    episode_rewards_in_iter.append(final_reward)
+                    episode_lengths_in_iter.append(len(states))
+                    
+                    logger.debug(f"✅ Generated: '{generated_text[:50]}...', Reward: {final_reward:.4f}, Steps: {len(states)}")
+                else:
+                    logger.warning(f"⚠️ Empty generation result for prompt: {prompt}")
+                    episode_rewards_in_iter.append(0.0)
+                    episode_lengths_in_iter.append(0)
+                
             except Exception as e:
-                logger.warning(f"⚠️ Image generation/reward failed: {e}")
-                reward = 0.0
+                logger.warning(f"⚠️ Failed to process prompt '{prompt}': {e}")
+                episode_rewards_in_iter.append(0.0)
+                episode_lengths_in_iter.append(0)
             
-            # 5. 그룹 데이터에 추가
-            group_data['original_prompts'].append(prompt)
-            group_data['generated_sequences'].append(generated_sequence)
-            group_data['states'].extend(episode_states)
-            group_data['actions'].extend(episode_actions)
-            group_data['log_probs_old'].extend(episode_log_probs)
-            
-            # 각 스텝에 동일한 최종 보상 할당 (할인 적용 예정)
-            episode_length = len(episode_states)
-            group_data['rewards'].extend([reward] * episode_length)
-            group_data['episode_lengths'].append(episode_length)
-            
-            logger.debug(f"✅ Generated: '{generated_text[:50]}...', Reward: {reward:.4f}, Length: {episode_length}")
+            # --- Store Completed Rollout Data as Tensors ---
+            if rollout_states:
+                # Handle variable length sequences by padding or truncating
+                try:
+                    # Try to stack if all have same length
+                    if len(set(s.shape for s in rollout_states)) == 1:
+                        group_states_list.append(torch.stack(rollout_states))
+                        group_actions_list.append(torch.stack(rollout_actions).squeeze())
+                        group_log_probs_old_list.append(torch.stack(rollout_log_probs).squeeze())
+                    else:
+                        # Pad to same length
+                        max_len = max(s.shape[-1] for s in rollout_states)
+                        padded_states = []
+                        for state in rollout_states:
+                            if state.shape[-1] < max_len:
+                                pad_size = max_len - state.shape[-1]
+                                padded_state = torch.cat([state, torch.zeros(pad_size, dtype=state.dtype, device=state.device)])
+                            else:
+                                padded_state = state
+                            padded_states.append(padded_state)
+                        
+                        group_states_list.append(torch.stack(padded_states))
+                        group_actions_list.append(torch.stack(rollout_actions).squeeze())
+                        group_log_probs_old_list.append(torch.stack(rollout_log_probs).squeeze())
+                    
+                    group_rewards_list.append(rollout_rewards)
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to stack rollout data: {e}, using individual tensors")
+                    # Fallback: store as individual tensors
+                    group_states_list.append(rollout_states)
+                    group_actions_list.append(rollout_actions)
+                    group_log_probs_old_list.append(rollout_log_probs)
+                    group_rewards_list.append(rollout_rewards)
+            else:
+                # Empty rollout placeholder
+                group_states_list.append([])
+                group_actions_list.append([])
+                group_log_probs_old_list.append([])
+                group_rewards_list.append([])
         
-        logger.info(f"📊 Collected {len(group_data['states'])} steps from {len(prompts)} episodes")
-        logger.info(f"📊 Average reward: {np.mean(group_data['rewards']):.4f}")
+        # --- Set VLM Policy back to Training Mode ---
+        self.vlm_policy.model.train()
         
-        return group_data
-    
-    def _calculate_advantages_and_returns(self, group_data: Dict[str, Any]):
-        """
-        할인된 리턴과 어드밴티지 계산 (에피소드별)
-        """
-        logger.debug("🔄 Calculating discounted returns and advantages...")
-        
-        returns = []
-        advantages = []
-        
-        start_idx = 0
-        for episode_length in group_data['episode_lengths']:
-            # 에피소드 보상 추출
-            episode_rewards = group_data['rewards'][start_idx:start_idx + episode_length]
-            
-            # 할인된 리턴 계산 (역순)
-            episode_returns = []
-            discounted_return = 0.0
-            
-            for reward in reversed(episode_rewards):
-                discounted_return = reward + self.config.gamma * discounted_return
-                episode_returns.insert(0, discounted_return)
-            
-            returns.extend(episode_returns)
-            start_idx += episode_length
-        
-        # 그룹 정규화를 위한 어드밴티지 계산
-        returns_array = np.array(returns, dtype=np.float32)
-        
-        if len(returns_array) > 1:
-            group_mean = np.mean(returns_array)
-            group_std = np.std(returns_array)
-            advantages_array = (returns_array - group_mean) / (group_std + self.config.epsilon_std)
-        else:
-            advantages_array = np.array([0.0])
-        
-        # 텐서로 변환
-        group_data['returns'] = [torch.tensor(ret, dtype=torch.float32, device=self.device) for ret in returns]
-        group_data['advantages'] = [torch.tensor(adv, dtype=torch.float32, device=self.device) for adv in advantages_array]
-        
-        logger.debug(f"📊 Returns: mean={np.mean(returns_array):.4f}, std={np.std(returns_array):.4f}")
-        logger.debug(f"📊 Advantages: mean={np.mean(advantages_array):.4f}, std={np.std(advantages_array):.4f}")
-    
-    def grpo_update(self, group_data: Dict[str, Any]) -> Dict[str, float]:
-        """
-        GRPO 업데이트 - 토큰별 정책 개선
-        """
-        logger.info("🔄 Starting GRPO update...")
-        
-        # 1. 어드밴티지 계산
-        self._calculate_advantages_and_returns(group_data)
-        
-        # 2. 참조 모델 생성
-        policy_ref = TokenPolicyNetwork(
-            vocab_size=self.vocab_size,
-            embed_dim=256,
-            hidden_dim=512
-        ).to(self.device)
-        policy_ref.load_state_dict(self.policy_network.state_dict())
-        policy_ref.eval()
-        
-        # 3. 여러 에포크 업데이트
-        total_policy_loss = 0.0
-        total_entropy = 0.0
-        total_kl_div = 0.0
-        
-        for epoch in range(self.config.grpo_epochs):
-            metrics = self._grpo_epoch_update(group_data, policy_ref)
-            total_policy_loss += metrics['policy_loss']
-            total_entropy += metrics['entropy']
-            total_kl_div += metrics['kl_div']
-        
-        # 4. 평균 메트릭
-        avg_metrics = {
-            'policy_loss': total_policy_loss / self.config.grpo_epochs,
-            'entropy': total_entropy / self.config.grpo_epochs,
-            'kl_div': total_kl_div / self.config.grpo_epochs,
-            'avg_reward': np.mean([r for episode_rewards in group_data['rewards'] for r in episode_rewards] if isinstance(group_data['rewards'][0], list) else group_data['rewards'])
-        }
-        
-        # 5. 통계 업데이트
-        self.training_stats.update(avg_metrics)
-        self.training_stats['iteration'] += 1
-        self.training_stats['total_samples'] += len(group_data['states'])
-        
-        logger.info(f"✅ GRPO update complete:")
-        logger.info(f"  Policy Loss: {avg_metrics['policy_loss']:.4f}")
-        logger.info(f"  Entropy: {avg_metrics['entropy']:.4f}")
-        logger.info(f"  KL Div: {avg_metrics['kl_div']:.4f}")
-        logger.info(f"  Avg Reward: {avg_metrics['avg_reward']:.4f}")
-        
-        return avg_metrics
-    
-    def _grpo_epoch_update(self, group_data: Dict[str, Any], policy_ref: TokenPolicyNetwork) -> Dict[str, float]:
-        """
-        단일 에포크 GRPO 업데이트
-        """
-        self.optimizer.zero_grad()
-        
-        total_policy_loss = 0.0
-        total_entropy = 0.0
-        total_kl_div = 0.0
-        batch_size = len(group_data['states'])
-        
-        for i in range(batch_size):
-            # 현재 스텝 데이터
-            state = group_data['states'][i].unsqueeze(0)  # [1, seq_len]
-            action = group_data['actions'][i]
-            old_log_prob = group_data['log_probs_old'][i]
-            advantage = group_data['advantages'][i]
-            
-            # 현재 정책 분포
-            current_policy_dist = self.policy_network(state)
-            current_log_prob = current_policy_dist.log_prob(action)
-            
-            # 참조 정책 분포
-            with torch.no_grad():
-                ref_policy_dist = policy_ref(state)
-            
-            # PPO/GRPO 손실 계산
-            log_ratio = current_log_prob - old_log_prob.detach()
-            ratio = torch.exp(log_ratio)
-            
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1 - self.config.clip_epsilon, 1 + self.config.clip_epsilon) * advantage
-            policy_loss_i = -torch.min(surr1, surr2)
-            
-            # 엔트로피 및 KL 발산
-            entropy_i = current_policy_dist.entropy()
-            kl_div_i = torch.distributions.kl_divergence(ref_policy_dist, current_policy_dist)
-            
-            total_policy_loss += policy_loss_i
-            total_entropy += entropy_i
-            total_kl_div += kl_div_i
-        
-        # 평균 및 총 손실
-        avg_policy_loss = total_policy_loss / batch_size
-        avg_entropy = total_entropy / batch_size
-        avg_kl_div = total_kl_div / batch_size
-        
-        total_loss = avg_policy_loss + self.config.kl_beta * avg_kl_div - self.config.entropy_coeff * avg_entropy
-        
-        # 역전파
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), self.config.max_grad_norm)
-        self.optimizer.step()
+        logger.info(f"📊 Collected {len(group_states_list)} trajectories")
+        avg_reward = np.mean(episode_rewards_in_iter) if episode_rewards_in_iter else 0.0
+        avg_length = np.mean(episode_lengths_in_iter) if episode_lengths_in_iter else 0.0
+        logger.info(f"📊 Average reward: {avg_reward:.4f}, Average length: {avg_length:.1f}")
         
         return {
-            'policy_loss': float(avg_policy_loss.detach()),
-            'entropy': float(avg_entropy.detach()),
-            'kl_div': float(avg_kl_div.detach()),
-            'total_loss': float(total_loss.detach())
+            'group_states_list': group_states_list,
+            'group_actions_list': group_actions_list,
+            'group_log_probs_old_list': group_log_probs_old_list,
+            'group_rewards_list': group_rewards_list,
+            'episode_rewards': episode_rewards_in_iter,
+            'episode_lengths': episode_lengths_in_iter
+        }
+    
+    def calculate_group_advantages(self, group_data: Dict[str, Any]) -> List[torch.Tensor]:
+        """
+        그룹 상대적 어드밴티지 계산 (할인된 리턴 방법)
+        """
+        logger.debug("🔄 Calculating group relative advantages...")
+        
+        group_rewards_list = group_data['group_rewards_list']
+        
+        # --- Lists for Group Advantage Calculation ---
+        group_advantages_list: List[torch.Tensor] = []
+        all_raw_advantages_in_group: List[float] = []
+        temp_raw_advantages_tensors: List[torch.Tensor] = []
+        
+        # --- First Pass: Calculate RAW Discounted Returns-to-go ---
+        for i, rollout_rewards in enumerate(group_rewards_list):
+            rollout_len = len(rollout_rewards)
+            rollout_raw_advantages = torch.zeros(rollout_len, dtype=torch.float32, device=self.device)
+            
+            if rollout_len > 0:
+                # Calculate discounted returns (G_t = r_t + gamma*G_{t+1})
+                discounted_return = 0.0
+                for t in reversed(range(rollout_len)):
+                    discounted_return = rollout_rewards[t] + self.config.gamma * discounted_return
+                    rollout_raw_advantages[t] = discounted_return
+                
+                # Store raw advantages for normalization
+                temp_raw_advantages_tensors.append(rollout_raw_advantages)
+                all_raw_advantages_in_group.extend(rollout_raw_advantages.cpu().numpy())
+            else:
+                temp_raw_advantages_tensors.append(torch.empty((0,), device=self.device))
+        
+        # --- Calculate Mean/Std of ALL RAW Discounted Returns ---
+        if len(all_raw_advantages_in_group) > 1:
+            group_mean_advantage = np.mean(all_raw_advantages_in_group)
+            group_std_advantage = np.std(all_raw_advantages_in_group)
+        elif len(all_raw_advantages_in_group) == 1:
+            group_mean_advantage = all_raw_advantages_in_group[0]
+            group_std_advantage = 0.0
+        else:
+            group_mean_advantage = 0.0
+            group_std_advantage = 0.0
+            logger.warning("⚠️ No advantages calculated in group (all rollouts empty?)")
+        
+        # --- Second Pass: Normalize Raw Discounted Returns ---
+        for i, raw_advantages_tensor in enumerate(temp_raw_advantages_tensors):
+            if raw_advantages_tensor.nelement() > 0:
+                # Normalize using group's mean/std
+                normalized_advantages = (raw_advantages_tensor - group_mean_advantage) / (group_std_advantage + self.config.epsilon_std)
+            else:
+                normalized_advantages = raw_advantages_tensor
+            
+            group_advantages_list.append(normalized_advantages)
+        
+        logger.debug(f"📊 Group advantages: mean={group_mean_advantage:.4f}, std={group_std_advantage:.4f}")
+        
+        return group_advantages_list
+    
+    def update_grpo_policy(self, group_data: Dict[str, Any], group_advantages_list: List[torch.Tensor]) -> Dict[str, float]:
+        """
+        GRPO 정책 업데이트 수행
+        """
+        logger.info("🔄 Performing GRPO policy update...")
+        
+        # --- Create Reference Policy (Copy current VLM state) ---
+        if self.vlm_policy_ref is None:
+            self._create_reference_policy()
+        else:
+            # Update reference policy to current state
+            self.vlm_policy_ref.load_state_dict(self.vlm_policy.model.state_dict())
+            self.vlm_policy_ref.eval()
+        
+        # --- Extract Group Data ---
+        group_states_list = group_data['group_states_list']
+        group_actions_list = group_data['group_actions_list']
+        group_log_probs_old_list = group_data['group_log_probs_old_list']
+        
+        # --- GRPO Update Loop ---
+        total_policy_loss = 0.0
+        total_kl_div = 0.0
+        total_entropy = 0.0
+        update_count = 0
+        
+        for epoch in range(self.config.grpo_epochs):
+            epoch_policy_loss = 0.0
+            epoch_kl_div = 0.0
+            epoch_entropy = 0.0
+            
+            # --- Process Each Trajectory in Group ---
+            for i in range(len(group_states_list)):
+                states = group_states_list[i]
+                actions = group_actions_list[i]
+                log_probs_old = group_log_probs_old_list[i]
+                advantages = group_advantages_list[i]
+                
+                # Handle different data types (tensor vs list)
+                if isinstance(states, list):
+                    if not states:  # Empty list
+                        continue
+                    # Convert list to tensor if possible
+                    try:
+                        if len(set(s.shape for s in states)) == 1:
+                            states = torch.stack(states)
+                            actions = torch.stack(actions).squeeze() if isinstance(actions, list) else actions
+                            log_probs_old = torch.stack(log_probs_old).squeeze() if isinstance(log_probs_old, list) else log_probs_old
+                        else:
+                            logger.warning(f"⚠️ Skipping trajectory {i} due to inconsistent tensor shapes")
+                            continue
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to process trajectory {i}: {e}")
+                        continue
+                elif hasattr(states, 'nelement') and states.nelement() == 0:  # Empty tensor
+                    continue
+                
+                # --- Calculate Current Policy Log Probs ---
+                try:
+                    current_log_probs = []
+                    current_entropies = []
+                    ref_log_probs = []
+                    
+                    for step in range(len(states)):
+                        state = states[step].unsqueeze(0)  # Add batch dimension
+                        action = actions[step]
+                        
+                        # Current policy
+                        current_policy_dist = self.vlm_policy.forward(state)
+                        current_log_prob = self.vlm_policy.get_log_prob(state, action)
+                        current_entropy = current_policy_dist.entropy()
+                        
+                        # Reference policy
+                        with torch.no_grad():
+                            ref_outputs = self.vlm_policy_ref(input_ids=state, return_dict=True)
+                            ref_logits = ref_outputs.logits[:, -1, :]
+                            ref_policy_dist = Categorical(logits=ref_logits)
+                            ref_log_prob = ref_policy_dist.log_prob(action)
+                        
+                        current_log_probs.append(current_log_prob)
+                        current_entropies.append(current_entropy)
+                        ref_log_probs.append(ref_log_prob)
+                    
+                    if not current_log_probs:
+                        continue
+                    
+                    current_log_probs = torch.stack(current_log_probs)
+                    current_entropies = torch.stack(current_entropies)
+                    ref_log_probs = torch.stack(ref_log_probs)
+                    
+                    # Ensure log_probs_old is tensor
+                    if isinstance(log_probs_old, list):
+                        log_probs_old = torch.stack(log_probs_old).squeeze()
+                    
+                    # --- GRPO Loss Calculation ---
+                    log_ratio = current_log_probs - log_probs_old.detach()
+                    ratio = torch.exp(log_ratio)
+                    
+                    # PPO-style clipped surrogate loss
+                    surr1 = ratio * advantages
+                    surr2 = torch.clamp(ratio, 1 - self.config.clip_epsilon, 1 + self.config.clip_epsilon) * advantages
+                    policy_loss = -torch.min(surr1, surr2).mean()
+                    
+                    # KL divergence penalty
+                    log_ratio_ref_curr = ref_log_probs - current_log_probs.detach()
+                    kl_div = torch.exp(log_ratio_ref_curr) - log_ratio_ref_curr - 1
+                    kl_div = torch.relu(kl_div).mean()
+                    
+                    # Entropy bonus
+                    entropy = current_entropies.mean()
+                    
+                    # Combined loss
+                    total_loss = policy_loss + self.config.kl_beta * kl_div - self.config.entropy_coeff * entropy
+                    
+                    # --- Backward Pass ---
+                    self.vlm_optimizer.zero_grad()
+                    total_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.vlm_policy.model.parameters(), self.config.max_grad_norm)
+                    self.vlm_optimizer.step()
+                    
+                    # --- Accumulate Metrics ---
+                    epoch_policy_loss += policy_loss.item()
+                    epoch_kl_div += kl_div.item()
+                    epoch_entropy += entropy.item()
+                    update_count += 1
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to update trajectory {i}: {e}")
+                    continue
+            
+            total_policy_loss += epoch_policy_loss
+            total_kl_div += epoch_kl_div
+            total_entropy += epoch_entropy
+        
+        # --- Calculate Average Metrics ---
+        if update_count > 0:
+            avg_policy_loss = total_policy_loss / update_count
+            avg_kl_div = total_kl_div / update_count
+            avg_entropy = total_entropy / update_count
+        else:
+            avg_policy_loss = 0.0
+            avg_kl_div = 0.0
+            avg_entropy = 0.0
+        
+        logger.info(f"✅ GRPO update complete - Policy Loss: {avg_policy_loss:.4f}, KL: {avg_kl_div:.4f}, Entropy: {avg_entropy:.4f}")
+        
+        return {
+            'policy_loss': avg_policy_loss,
+            'kl_div': avg_kl_div,
+            'entropy': avg_entropy
+        }
+    
+    def train_iteration(self, prompts: List[str]) -> Dict[str, float]:
+        """
+        단일 GRPO 학습 반복 수행
+        """
+        # --- 1. Collect Group of Trajectories (Rollout Phase) ---
+        group_data = self.collect_group_trajectories(prompts)
+        
+        # --- 2. Calculate Group Relative Advantages ---
+        group_advantages_list = self.calculate_group_advantages(group_data)
+        
+        # --- 3. Perform GRPO Update ---
+        update_metrics = self.update_grpo_policy(group_data, group_advantages_list)
+        
+        # --- 4. Update Training Statistics ---
+        avg_reward = np.mean(group_data['episode_rewards']) if group_data['episode_rewards'] else 0.0
+        
+        self.training_stats['iteration'] += 1
+        self.training_stats['avg_reward'] = avg_reward
+        self.training_stats['policy_loss'] = update_metrics['policy_loss']
+        self.training_stats['entropy'] = update_metrics['entropy']
+        self.training_stats['kl_div'] = update_metrics['kl_div']
+        
+        # --- 5. Store for Logging/Plotting ---
+        self.iteration_rewards.append(avg_reward)
+        self.iteration_policy_losses.append(update_metrics['policy_loss'])
+        self.iteration_entropies.append(update_metrics['entropy'])
+        self.iteration_kl_divs.append(update_metrics['kl_div'])
+        
+        return {
+            'avg_reward': avg_reward,
+            'policy_loss': update_metrics['policy_loss'],
+            'entropy': update_metrics['entropy'],
+            'kl_div': update_metrics['kl_div']
         }
     
     def get_training_stats(self) -> Dict[str, Any]:
@@ -451,14 +526,18 @@ class GRPOTrainer:
         return self.training_stats.copy()
     
     def save_checkpoint(self, checkpoint_path: str):
-        """체크포인트 저장"""
+        """체크포인트 저장 - VLM 모델 상태 저장"""
         try:
             checkpoint = {
-                'policy_network_state_dict': self.policy_network.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
+                'vlm_model_state_dict': self.vlm_policy.model.state_dict(),
+                'optimizer_state_dict': self.vlm_optimizer.state_dict(),
                 'tokenizer': self.tokenizer,
                 'config': self.config,
-                'training_stats': self.training_stats
+                'training_stats': self.training_stats,
+                'iteration_rewards': self.iteration_rewards,
+                'iteration_policy_losses': self.iteration_policy_losses,
+                'iteration_entropies': self.iteration_entropies,
+                'iteration_kl_divs': self.iteration_kl_divs
             }
             torch.save(checkpoint, checkpoint_path)
             logger.info(f"💾 Checkpoint saved: {checkpoint_path}")
@@ -466,12 +545,23 @@ class GRPOTrainer:
             logger.error(f"❌ Failed to save checkpoint: {e}")
     
     def load_checkpoint(self, checkpoint_path: str):
-        """체크포인트 로드"""
+        """체크포인트 로드 - VLM 모델 상태 로드"""
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            self.policy_network.load_state_dict(checkpoint['policy_network_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.vlm_policy.model.load_state_dict(checkpoint['vlm_model_state_dict'])
+            self.vlm_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             self.training_stats = checkpoint['training_stats']
+            
+            # Load logging data if available
+            if 'iteration_rewards' in checkpoint:
+                self.iteration_rewards = checkpoint['iteration_rewards']
+                self.iteration_policy_losses = checkpoint['iteration_policy_losses']
+                self.iteration_entropies = checkpoint['iteration_entropies']
+                self.iteration_kl_divs = checkpoint['iteration_kl_divs']
+            
+            # 참조 정책 재생성
+            self._create_reference_policy()
+            
             logger.info(f"📂 Checkpoint loaded: {checkpoint_path}")
         except Exception as e:
             logger.error(f"❌ Failed to load checkpoint: {e}")
@@ -479,15 +569,31 @@ class GRPOTrainer:
 # 테스트용 Mock 클래스들
 if __name__ == "__main__":
     class MockVLM:
-        def enhance_prompt(self, prompt):
-            return f"enhanced {prompt}"
+        def __init__(self):
+            self.model = torch.nn.Linear(10, 10)  # 더미 모델
+            self.tokenizer = None
+            
+        def forward(self, input_ids):
+            return Categorical(logits=torch.randn(1, 1000))
+            
+        def generate_sequence(self, prompt, max_new_tokens=10):
+            return {
+                'generated_text': f"enhanced {prompt}",
+                'generated_ids': torch.randint(0, 1000, (1, 10)),
+                'states': [torch.randint(0, 1000, (5,)) for _ in range(3)],
+                'actions': [torch.randint(0, 1000, (1,)) for _ in range(3)],
+                'log_probs': [torch.randn(1) for _ in range(3)]
+            }
+            
+        def get_log_prob(self, input_ids, target_token):
+            return torch.randn(1)
     
     class MockSDGenerator:
         def generate_image(self, prompt):
             return f"image_for_{prompt[:20]}"
     
     class MockCLIPReward:
-        def calculate_reward(self, image, text, original_prompt):
+        def calculate_reward(self, image, text):
             return np.random.uniform(0.3, 0.8)
     
     # 테스트
@@ -500,6 +606,5 @@ if __name__ == "__main__":
     )
     
     test_prompts = ["a beautiful sunset", "a cat in the garden"]
-    group_data = trainer.collect_group_data(test_prompts)
-    metrics = trainer.grpo_update(group_data)
+    metrics = trainer.train_iteration(test_prompts)
     print(f"Test metrics: {metrics}") 

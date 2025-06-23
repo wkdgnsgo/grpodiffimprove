@@ -1,39 +1,59 @@
 {
   "_comment": "VLM GRPO System Default Configuration",
-  "_description": "이 파일은 VLM GRPO 시스템의 기본 설정을 포함합니다.",
+  "_description": "이 파일은 VLM GRPO 시스템의 기본 설정을 포함합니다. Qwen2.5-VL을 직접 정책 네트워크로 학습합니다.",
 
   "model_settings": {
     "_comment": "모델 관련 설정",
     "vlm_model": "Qwen/Qwen2.5-VL-7B-Instruct",
     "sd_model": "stabilityai/stable-diffusion-3-medium-diffusers",
-    "clip_model": "openai/clip-vit-base-patch32"
+    "clip_model": "openai/clip-vit-base-patch32",
+
+    "vlm_training": {
+      "_comment": "VLM 학습 관련 설정",
+      "use_lora": true,
+      "lora_rank": 16,
+      "lora_alpha": 32,
+      "lora_dropout": 0.1,
+      "lora_target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
+      "load_in_8bit": false,
+      "load_in_4bit": true,
+      "_description": "LoRA를 사용하여 Qwen2.5-VL을 효율적으로 학습"
+    }
   },
 
   "training_settings": {
     "_comment": "학습 관련 설정",
-    "learning_rate": 1e-5,
+    "learning_rate": 5e-6,
     "group_size": 4,
-    "num_iterations": 50,
-    "grpo_epochs": 2,
-    "validation_interval": 1,
+    "num_iterations": 100,
+    "grpo_epochs": 3,
+    "validation_interval": 5,
     "checkpoint_interval": 10,
 
-    "grpo_parameters": {
-      "_comment": "GRPO 알고리즘 파라미터 - 논문 기반 설정 (Shao et al. 2024)",
-      "gamma": 0.99,
-      "kl_beta": 0.01,
-      "clip_epsilon": 0.2,
-      "entropy_coeff": 0.01,
-      "max_grad_norm": 1.0,
-      "epsilon_std": 1e-8,
-      "_paper_reference": "DeepSeekMath: Pushing the Limits of Mathematical Reasoning (Shao et al., 2024)"
+    "_comment_grpo": "GRPO 알고리즘 파라미터 - 논문 기반 설정 (Shao et al. 2024)",
+    "gamma": 0.99,
+    "kl_beta": 0.02,
+    "clip_epsilon": 0.2,
+    "entropy_coeff": 0.01,
+    "max_grad_norm": 1.0,
+    "epsilon_std": 1e-8,
+    "_paper_reference": "DeepSeekMath: Pushing the Limits of Mathematical Reasoning (Shao et al., 2024)",
+
+    "vlm_policy_settings": {
+      "_comment": "VLM 정책 네트워크 설정",
+      "max_new_tokens": 25,
+      "temperature": 0.8,
+      "top_p": 0.9,
+      "do_sample": true,
+      "use_cache": true,
+      "_description": "Qwen2.5-VL 정책 네트워크 생성 파라미터"
     }
   },
 
   "data_settings": {
     "_comment": "데이터 관련 설정",
-    "train_data_path": "train_prompts.jsonl",
-    "val_data_path": "val_prompts.jsonl",
+    "train_prompts_file": "train_prompts.jsonl",
+    "val_prompts_file": "val_prompts.jsonl",
     "batch_shuffle": true,
     "use_balanced_batches": false
   },
@@ -41,7 +61,7 @@
   "generation_settings": {
     "_comment": "생성 관련 설정",
     "vlm_generation": {
-      "max_new_tokens": 50,
+      "max_new_tokens": 25,
       "temperature": 0.8,
       "top_p": 0.9
     },
@@ -104,23 +124,24 @@
   "wandb_settings": {
     "_comment": "Wandb 실험 추적 설정",
     "use_wandb": true,
-    "project": "vlm-grpo-training",
+    "project_name": "qwen-vlm-grpo-training",
     "entity": null,
-    "tags": ["vlm", "grpo", "text-to-image", "verifiable-rewards"],
-    "notes": "VLM GRPO training with paper-based verifiable rewards"
+    "tags": ["qwen2.5-vl", "grpo", "text-to-image", "lora", "policy-training"],
+    "notes": "Qwen2.5-VL direct policy training with GRPO and LoRA"
   },
 
   "system_settings": {
     "_comment": "시스템 관련 설정",
     "device": "cpu",
-    "mixed_precision": false,
-    "gradient_checkpointing": false,
-    "memory_efficient": true
+    "mixed_precision": true,
+    "gradient_checkpointing": true,
+    "memory_efficient": true,
+    "max_memory_usage": "80%"
   },
 
   "evaluation_settings": {
     "_comment": "평가 관련 설정",
-    "eval_batch_size": 10,
+    "eval_batch_size": 5,
     "save_eval_images": true,
     "eval_categories": ["basic", "complex", "photography", "creative"],
     "eval_difficulties": ["easy", "medium", "hard"]

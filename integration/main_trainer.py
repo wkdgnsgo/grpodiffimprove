@@ -25,6 +25,7 @@ import time
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 import json
+import numpy as np
 
 # 프로젝트 경로 추가
 sys.path.append(str(Path(__file__).parent.parent))
@@ -61,7 +62,7 @@ except ImportError as e:
     print(f"⚠️ GRPO modules import warning: {e}")
 
 try:
-    from utils.data_loader import DataLoader
+    from utils.data_loader import DataLoader as PromptDataLoader
 except ImportError as e:
     print(f"⚠️ DataLoader import warning: {e}")
 
@@ -102,21 +103,30 @@ class VLMGRPOSystem:
         # 로깅 설정
         self._setup_logging()
         
-        # 컴포넌트 초기화
-        self.vlm = None
-        self.sd_generator = None
-        self.clip_calculator = None
-        self.multi_reward_calculator = None
-        self.grpo_trainer = None
-        self.data_loader = None
-        self.validator = None
-        self.wandb_logger = None
+        # --- Core Components ---
+        self.vlm_policy = None              # VLM 정책 네트워크 (Qwen2.5-VL)
+        self.sd_generator = None            # SD3 생성기 (동결됨)
+        self.clip_reward = None             # CLIP 보상 계산기 (동결됨)
+        self.grpo_trainer = None            # GRPO 트레이너
+        self.data_loader = None             # 데이터 로더
+        self.validator = None               # 검증기
+        self.wandb_logger = None            # Wandb 로거
         
-        # 학습 상태
+        # --- Training Configuration ---
+        self.grpo_config = None
+        
+        # --- Lists for Logging/Plotting ---
+        self.iteration_rewards = []
+        self.iteration_policy_losses = []
+        self.iteration_entropies = []
+        self.iteration_kl_divs = []
+        
+        # --- Training Statistics ---
         self.training_stats = {
             'best_reward': float('-inf'),
             'total_iterations': 0,
-            'total_time': 0.0
+            'total_time': 0.0,
+            'current_iteration': 0
         }
         
         logger.info("🚀 VLM GRPO System initialized")
@@ -145,37 +155,37 @@ class VLMGRPOSystem:
     
     def initialize_components(self):
         """
-        모든 컴포넌트 초기화
+        모든 컴포넌트 초기화 - 제공된 코드 형식을 따름
         
-        이 메서드는 시스템의 모든 구성 요소를 순서대로 초기화합니다:
-        1. VLM (프롬프트 개선)
-        2. SD3 Generator (이미지 생성)
-        3. CLIP Reward Calculator (보상 계산)
-        4. GRPO Trainer (강화학습)
-        5. Data Loader (데이터 관리)
-        6. Validator (검증)
-        7. Wandb Logger (실험 추적)
+        # --- Initialization ---
+        vlm_policy: VLMWrapper = VLMWrapper(...)
+        sd_generator: SD3Generator = SD3Generator(...)
+        clip_reward: CLIPRewardCalculator = CLIPRewardCalculator(...)
+        grpo_trainer: GRPOTrainer = GRPOTrainer(vlm_policy, sd_generator, clip_reward, config)
         """
         try:
             logger.info("🔧 Initializing components...")
             
-            # 1. VLM 초기화
-            logger.info("📝 Initializing VLM...")
+            # --- VLM Policy Network Initialization ---
+            logger.info("📝 Initializing VLM Policy Network...")
             if VLMWrapper is None:
                 raise ImportError("VLMWrapper not available. Please install required dependencies.")
-            self.vlm = VLMWrapper(
+            
+            self.vlm_policy: VLMWrapper = VLMWrapper(
                 config_path=self.config_path,
                 device=self.config['system_settings']['device'],
                 max_new_tokens=self.config['generation_settings']['vlm_generation']['max_new_tokens'],
                 temperature=self.config['generation_settings']['vlm_generation']['temperature'],
                 top_p=self.config['generation_settings']['vlm_generation']['top_p']
             )
+            logger.info(f"✅ VLM Policy Network initialized: {self.vlm_policy.model_name}")
             
-            # 2. SD3 Generator 초기화
+            # --- SD3 Generator Initialization (Frozen) ---
             logger.info("🎨 Initializing SD3 Generator...")
             if SD3Generator is None:
                 raise ImportError("SD3Generator not available. Please install required dependencies.")
-            self.sd_generator = SD3Generator(
+            
+            self.sd_generator: SD3Generator = SD3Generator(
                 config_path=self.config_path,
                 device=self.config['system_settings']['device'],
                 height=self.config['generation_settings']['sd_generation']['height'],
@@ -183,97 +193,90 @@ class VLMGRPOSystem:
                 num_inference_steps=self.config['generation_settings']['sd_generation']['num_inference_steps'],
                 guidance_scale=self.config['generation_settings']['sd_generation']['guidance_scale']
             )
+            logger.info(f"✅ SD3 Generator initialized: {self.sd_generator.model_name}")
             
-            # 3. CLIP Reward Calculator 초기화
+            # --- CLIP Reward Calculator Initialization (Frozen) ---
             logger.info("🏆 Initializing CLIP Reward Calculator...")
             if CLIPRewardCalculator is None:
                 raise ImportError("CLIPRewardCalculator not available. Please install required dependencies.")
-            self.clip_calculator = CLIPRewardCalculator(
+            
+            self.clip_reward: CLIPRewardCalculator = CLIPRewardCalculator(
                 model_name=self.config['model_settings']['clip_model'],
                 device=self.config['system_settings']['device'],
                 reward_weights=self.config['reward_settings']['reward_weights']
             )
+            logger.info(f"✅ CLIP Reward Calculator initialized: {self.clip_reward.model_name}")
             
-            # 4. Multi Reward Calculator 초기화
-            if MultiRewardCalculator is None:
-                raise ImportError("MultiRewardCalculator not available. Please install required dependencies.")
-            self.multi_reward_calculator = MultiRewardCalculator(
-                self.clip_calculator
-            )
-            
-            # 5. GRPO Trainer 초기화
-            logger.info("🎯 Initializing GRPO Trainer...")
-            if GRPOTrainer is None or GRPOConfig is None:
-                raise ImportError("GRPO modules not available. Please install required dependencies.")
-            grpo_config = GRPOConfig(
+            # --- GRPO Configuration ---
+            self.grpo_config: GRPOConfig = GRPOConfig(
                 learning_rate=self.config['training_settings']['learning_rate'],
                 group_size=self.config['training_settings']['group_size'],
                 num_iterations=self.config['training_settings']['num_iterations'],
                 grpo_epochs=self.config['training_settings']['grpo_epochs'],
-                gamma=self.config['training_settings']['grpo_parameters']['gamma'],
-                kl_beta=self.config['training_settings']['grpo_parameters']['kl_beta'],
-                clip_epsilon=self.config['training_settings']['grpo_parameters']['clip_epsilon'],
-                entropy_coeff=self.config['training_settings']['grpo_parameters']['entropy_coeff'],
-                max_grad_norm=self.config['training_settings']['grpo_parameters']['max_grad_norm'],
-                epsilon_std=self.config['training_settings']['grpo_parameters']['epsilon_std'],
+                gamma=self.config['training_settings']['gamma'],
+                kl_beta=self.config['training_settings']['kl_beta'],
+                clip_epsilon=self.config['training_settings']['clip_epsilon'],
+                entropy_coeff=self.config['training_settings']['entropy_coeff'],
+                max_grad_norm=self.config['training_settings']['max_grad_norm'],
                 max_new_tokens=self.config['generation_settings']['vlm_generation']['max_new_tokens'],
-                vocab_size=50000,  # GPT-2 기본 vocab 크기
-                max_sequence_length=100,  # 최대 시퀀스 길이
                 temperature=self.config['generation_settings']['vlm_generation']['temperature'],
                 device=self.config['system_settings']['device']
             )
-            self.grpo_trainer = GRPOTrainer(
-                vlm_model=self.vlm,
-                sd_generator=self.sd_generator,
-                clip_reward=self.clip_calculator,
-                config=grpo_config
-            )
+            logger.info("✅ GRPO Configuration created")
             
-            # 6. Data Loader 초기화
+            # --- GRPO Trainer Initialization ---
+            logger.info("🎯 Initializing GRPO Trainer...")
+            if GRPOTrainer is None:
+                raise ImportError("GRPOTrainer not available. Please install required dependencies.")
+            
+            self.grpo_trainer: GRPOTrainer = GRPOTrainer(
+                vlm_model=self.vlm_policy,
+                sd_generator=self.sd_generator,
+                clip_reward=self.clip_reward,
+                config=self.grpo_config
+            )
+            logger.info("✅ GRPO Trainer initialized")
+            
+            # --- Data Loader Initialization ---
             logger.info("📊 Initializing Data Loader...")
-            try:
-                self.data_loader = DataLoader(
-                    train_data_path=self.config['data_settings']['train_data_path'],
-                    val_data_path=self.config['data_settings']['val_data_path'],
-                    batch_shuffle=self.config['data_settings']['batch_shuffle']
-                )
-            except Exception as e:
-                logger.error(f"❌ Data Loader initialization failed: {e}")
+            if PromptDataLoader is None:
+                logger.warning("⚠️ DataLoader not available. Using default prompts.")
                 self.data_loader = None
+            else:
+                self.data_loader: PromptDataLoader = PromptDataLoader(
+                    train_file=self.config['data_settings']['train_prompts_file'],
+                    val_file=self.config['data_settings']['val_prompts_file'],
+                    batch_size=self.config['training_settings']['group_size']
+                )
+                logger.info("✅ Data Loader initialized")
             
-            # 7. Validator 초기화
-            logger.info("✅ Initializing Validator...")
+            # --- Validator Initialization ---
+            logger.info("🔍 Initializing Validator...")
             if ValidationEvaluator is None:
-                raise ImportError("ValidationEvaluator not available. Please install required dependencies.")
-            self.validator = ValidationEvaluator(
-                vlm=self.vlm,
-                sd_generator=self.sd_generator,
-                clip_calculator=self.clip_calculator
-            )
+                logger.warning("⚠️ Validator not available. Skipping validation.")
+                self.validator = None
+            else:
+                self.validator: ValidationEvaluator = ValidationEvaluator(
+                    vlm_model=self.vlm_policy,
+                    sd_generator=self.sd_generator,
+                    clip_calculator=self.clip_reward,
+                    config=self.config
+                )
+                logger.info("✅ Validator initialized")
             
-            # 8. Wandb Logger 초기화 (선택적)
-            if self.config.get("wandb_settings", {}).get("use_wandb", False):
-                logger.info("📈 Initializing Wandb Logger...")
-                if WandbLogger is None:
-                    logger.warning("⚠️ WandbLogger not available, skipping wandb initialization")
-                else:
-                    self.wandb_logger = WandbLogger(
-                        project=self.config.get("wandb_settings", {}).get("project", "vlm-grpo"),
-                        entity=self.config.get("wandb_settings", {}).get("entity", None),
-                        config=self.config
-                    )
+            # --- Wandb Logger Initialization ---
+            logger.info("📈 Initializing Wandb Logger...")
+            if WandbLogger is None:
+                logger.warning("⚠️ WandbLogger not available. Skipping wandb logging.")
+                self.wandb_logger = None
+            else:
+                self.wandb_logger: WandbLogger = WandbLogger(
+                    project_name=self.config['wandb_settings']['project_name'],
+                    config=self.config
+                )
+                logger.info("✅ Wandb Logger initialized")
             
-            # 출력 디렉토리 생성
-            os.makedirs(self.config["output_settings"]["output_dir"], exist_ok=True)
-            
-            # 학습 통계 초기화
-            self.training_stats = {
-                'best_reward': float('-inf'),
-                'total_iterations': 0,
-                'total_time': 0.0
-            }
-            
-            logger.info("✅ All components initialized successfully")
+            logger.info("🎉 All components initialized successfully!")
             
         except Exception as e:
             logger.error(f"❌ Component initialization failed: {e}")
@@ -281,324 +284,217 @@ class VLMGRPOSystem:
     
     def run_training(self):
         """
-        메인 학습 루프 실행
+        메인 GRPO 학습 루프 실행 - 제공된 코드 형식을 따름
         
-        이 메서드는 GRPO 학습의 전체 과정을 실행합니다:
-        1. 학습 데이터 배치 생성
-        2. VLM으로 프롬프트 개선
-        3. SD3로 이미지 생성
-        4. CLIP으로 보상 계산
-        5. GRPO 정책 업데이트
-        6. 주기적 검증 및 저장
+        # --- GRPO Training Loop ---
+        for iteration in range(NUM_ITERATIONS_GRPO):
+            # --- 1. Collect Group of Trajectories (Rollout Phase) ---
+            # --- 2. Calculate Group Relative Advantages ---
+            # --- 3. Perform GRPO Update ---
+            # --- Logging ---
         """
-        logger.info("🚀 Starting VLM GRPO training...")
-        self.start_time = time.time()
+        logger.info("🚀 Starting GRPO Training Loop...")
         
-        try:
-            for iteration in range(self.config["training_settings"]["num_iterations"]):
-                iteration_start = time.time()
+        if not all([self.vlm_policy, self.sd_generator, self.clip_reward, self.grpo_trainer]):
+            logger.error("❌ Components not initialized. Call initialize_components() first.")
+            return
+        
+        # --- Training Configuration ---
+        NUM_ITERATIONS_GRPO: int = self.grpo_config.num_iterations
+        GROUP_SIZE: int = self.grpo_config.group_size
+        INTERV_PRINT: int = max(1, NUM_ITERATIONS_GRPO // 10)
+        
+        # --- Get Training Prompts ---
+        if self.data_loader is not None:
+            train_prompts = self.data_loader.get_train_prompts()
+        else:
+            # Default prompts if data loader not available
+            train_prompts = [
+                "a beautiful sunset over mountains",
+                "a cat sitting in a garden",
+                "abstract art with vibrant colors",
+                "a futuristic city skyline",
+                "a peaceful forest scene"
+            ]
+        
+        logger.info(f"📝 Training with {len(train_prompts)} prompts")
+        logger.info(f"🔄 Starting {NUM_ITERATIONS_GRPO} iterations with group size {GROUP_SIZE}")
+        
+        # --- GRPO Training Loop ---
+        start_time = time.time()
+        
+        for iteration in range(NUM_ITERATIONS_GRPO):
+            iteration_start_time = time.time()
+            
+            logger.info(f"\n{'='*50}")
+            logger.info(f"🔄 Iteration {iteration+1}/{NUM_ITERATIONS_GRPO}")
+            logger.info(f"{'='*50}")
+            
+            try:
+                # --- 1. Sample Group Prompts ---
+                if len(train_prompts) >= GROUP_SIZE:
+                    # 랜덤 샘플링
+                    import random
+                    group_prompts = random.sample(train_prompts, GROUP_SIZE)
+                else:
+                    # 반복 샘플링
+                    group_prompts = (train_prompts * ((GROUP_SIZE // len(train_prompts)) + 1))[:GROUP_SIZE]
                 
-                logger.info(f"🔄 Iteration {iteration + 1}/{self.config['training_settings']['num_iterations']}")
+                logger.info(f"📝 Selected {len(group_prompts)} prompts for this iteration")
                 
-                # 1. 학습 배치 생성
-                if self.data_loader is None:
-                    logger.error("❌ Data loader not initialized")
-                    break
-                    
-                batch_prompts = self.data_loader.get_training_batch(
-                    batch_size=self.config["training_settings"]["group_size"]
-                )
+                # --- 2. Perform GRPO Training Iteration ---
+                iteration_metrics = self.grpo_trainer.train_iteration(group_prompts)
                 
-                if not batch_prompts:
-                    logger.warning("⚠️ No training data available, skipping iteration")
-                    continue
+                # --- 3. Update Training Statistics ---
+                self.training_stats['current_iteration'] = iteration + 1
+                self.training_stats['total_iterations'] = iteration + 1
                 
-                # 2. GRPO 그룹 데이터 수집 (토큰별 순차 생성)
-                if self.grpo_trainer is None:
-                    logger.error("❌ GRPO trainer not initialized")
-                    break
+                # Store metrics for plotting/logging
+                self.iteration_rewards.append(iteration_metrics['avg_reward'])
+                self.iteration_policy_losses.append(iteration_metrics['policy_loss'])
+                self.iteration_entropies.append(iteration_metrics['entropy'])
+                self.iteration_kl_divs.append(iteration_metrics['kl_div'])
                 
-                # GRPOTrainer의 collect_group_data 메서드 사용
-                group_data = self.grpo_trainer.collect_group_data(batch_prompts)
+                # --- 4. Check for Best Model ---
+                if iteration_metrics['avg_reward'] > self.training_stats['best_reward']:
+                    self.training_stats['best_reward'] = iteration_metrics['avg_reward']
+                    self._save_best_model(iteration + 1)
                 
-                # 3. GRPO 업데이트
-                training_metrics = self.grpo_trainer.grpo_update(group_data)
+                # --- 5. Logging ---
+                iteration_time = time.time() - iteration_start_time
+                self.training_stats['total_time'] += iteration_time
                 
-                # 4. 메트릭 로깅
-                iteration_time = time.time() - iteration_start
-                self._log_training_metrics(iteration + 1, training_metrics, iteration_time)
+                if (iteration + 1) % INTERV_PRINT == 0 or iteration == NUM_ITERATIONS_GRPO - 1:
+                    logger.info(f"\n📊 Iteration {iteration+1}/{NUM_ITERATIONS_GRPO} Summary:")
+                    logger.info(f"  Avg Reward (Group): {iteration_metrics['avg_reward']:.4f}")
+                    logger.info(f"  Policy Loss: {iteration_metrics['policy_loss']:.4f}")
+                    logger.info(f"  Entropy: {iteration_metrics['entropy']:.4f}")
+                    logger.info(f"  KL Divergence: {iteration_metrics['kl_div']:.4f}")
+                    logger.info(f"  Iteration Time: {iteration_time:.2f}s")
+                    logger.info(f"  Best Reward So Far: {self.training_stats['best_reward']:.4f}")
                 
-                # 5. 주기적 검증
-                if (iteration + 1) % self.config["training_settings"]["validation_interval"] == 0:
+                # --- 6. Wandb Logging ---
+                if self.wandb_logger is not None:
+                    self.wandb_logger.log_metrics({
+                        'iteration': iteration + 1,
+                        'avg_reward': iteration_metrics['avg_reward'],
+                        'policy_loss': iteration_metrics['policy_loss'],
+                        'entropy': iteration_metrics['entropy'],
+                        'kl_divergence': iteration_metrics['kl_div'],
+                        'iteration_time': iteration_time,
+                        'best_reward': self.training_stats['best_reward']
+                    })
+                
+                # --- 7. Validation ---
+                if self.validator is not None and (iteration + 1) % (INTERV_PRINT * 2) == 0:
                     self._run_validation(iteration + 1)
                 
-                # 6. 체크포인트 저장
-                if (iteration + 1) % self.config["training_settings"]["checkpoint_interval"] == 0:
+                # --- 8. Checkpoint Saving ---
+                if (iteration + 1) % (INTERV_PRINT * 2) == 0:
                     self._save_checkpoint(iteration + 1)
                 
-                # 7. 최고 성능 모델 저장
-                avg_reward = training_metrics.get('avg_reward', 0)
-                if avg_reward > self.training_stats['best_reward']:
-                    self.training_stats['best_reward'] = avg_reward
-                    self._save_best_model(iteration + 1)
-            
-            # 학습 완료
-            total_time = time.time() - self.start_time
-            self.training_stats['total_time'] = total_time
-            
-            logger.info(f"✅ Training completed! Total time: {total_time:.2f}s")
-            self._save_final_results()
-            
-        except Exception as e:
-            logger.error(f"❌ Training failed: {e}")
-            raise
-        finally:
-            # Wandb 세션 종료
-            if hasattr(self, 'wandb_logger') and self.wandb_logger:
-                self.wandb_logger.finish()
-    
-    def _collect_training_data(self, prompts: List[str]) -> Dict[str, Any]:
-        """
-        학습 데이터 수집: VLM + SD3 + CLIP 파이프라인
-        
-        Args:
-            prompts (List[str]): 입력 프롬프트들
-            
-        Returns:
-            Dict[str, Any]: 수집된 학습 데이터
-        """
-        logger.debug(f"📊 Collecting training data for {len(prompts)} prompts")
-        
-        group_data = {
-            'prompts': prompts,
-            'enhanced_prompts': [],
-            'images': [],
-            'rewards': [],
-            'comprehensive_rewards': []
-        }
-        
-        for prompt in prompts:
-            try:
-                # 1. VLM으로 프롬프트 개선
-                if self.vlm is None:
-                    logger.warning("⚠️ VLM not initialized, using original prompt")
-                    enhanced_prompt = prompt
-                else:
-                    enhanced_prompt = self.vlm.enhance_prompt(prompt)
-                
-                # 2. SD3로 이미지 생성
-                if self.sd_generator is None:
-                    logger.warning("⚠️ SD generator not initialized, skipping image generation")
-                    image = None
-                else:
-                    image = self.sd_generator.generate_image(enhanced_prompt)
-                
-                # 3. 종합적 보상 계산
-                if self.multi_reward_calculator is None:
-                    logger.warning("⚠️ Multi reward calculator not initialized, using default reward")
-                    rewards = {'final_reward': 0.0}
-                else:
-                    rewards = self.multi_reward_calculator.calculate_comprehensive_reward(
-                        image, prompt, enhanced_prompt
-                    )
-                
-                # 데이터 저장
-                group_data['enhanced_prompts'].append(enhanced_prompt)
-                group_data['images'].append(image)
-                group_data['rewards'].append(rewards['final_reward'])
-                group_data['comprehensive_rewards'].append(rewards)
-                
-                logger.debug(f"✅ Processed: '{prompt}' → reward: {rewards['final_reward']:.4f}")
-                
             except Exception as e:
-                logger.warning(f"⚠️ Failed to process prompt '{prompt}': {e}")
-                # 실패 시 기본값 사용
-                group_data['enhanced_prompts'].append(prompt)
-                group_data['images'].append(None)
-                group_data['rewards'].append(0.0)
-                group_data['comprehensive_rewards'].append({'final_reward': 0.0})
+                logger.error(f"❌ Error in iteration {iteration+1}: {e}")
+                continue
         
-        return group_data
-    
-    def _log_training_metrics(self, iteration: int, metrics: Dict, iteration_time: float):
-        """
-        학습 메트릭 로깅
+        # --- Training Complete ---
+        total_time = time.time() - start_time
+        self.training_stats['total_time'] = total_time
         
-        Args:
-            iteration (int): 현재 반복 횟수
-            metrics (Dict): 학습 메트릭
-            iteration_time (float): 반복 시간
-        """
-        # 기본 로깅
-        logger.info(f"📊 Iteration {iteration} metrics:")
-        logger.info(f"  - Policy Loss: {metrics.get('policy_loss', 0):.6f}")
-        logger.info(f"  - KL Divergence: {metrics.get('kl_div', 0):.6f}")
-        logger.info(f"  - Entropy: {metrics.get('entropy', 0):.6f}")
-        logger.info(f"  - Average Reward: {metrics.get('avg_reward', 0):.4f}")
-        logger.info(f"  - Iteration Time: {iteration_time:.2f}s")
+        logger.info(f"\n🎉 GRPO Training Loop Finished!")
+        logger.info(f"📊 Final Statistics:")
+        logger.info(f"  Total Iterations: {NUM_ITERATIONS_GRPO}")
+        logger.info(f"  Total Time: {total_time:.2f}s")
+        logger.info(f"  Average Time per Iteration: {total_time/NUM_ITERATIONS_GRPO:.2f}s")
+        logger.info(f"  Best Reward Achieved: {self.training_stats['best_reward']:.4f}")
         
-        # Wandb 로깅
-        if self.wandb_logger:
-            wandb_metrics = {
-                'iteration': iteration,
-                'policy_loss': metrics.get('policy_loss', 0),
-                'kl_divergence': metrics.get('kl_div', 0),
-                'entropy': metrics.get('entropy', 0),
-                'average_reward': metrics.get('avg_reward', 0),
-                'iteration_time': iteration_time,
-                'total_time': time.time() - self.start_time if hasattr(self, 'start_time') else 0
-            }
-            self.wandb_logger.log_training_metrics(wandb_metrics)
+        # --- Save Final Results ---
+        self._save_final_results()
+        
+        if self.wandb_logger is not None:
+            self.wandb_logger.finish()
     
     def _run_validation(self, iteration: int):
-        """
-        검증 실행
-        
-        Args:
-            iteration (int): 현재 반복 횟수
-        """
-        logger.info(f"🔍 Running validation at iteration {iteration}")
-        
+        """검증 실행"""
         try:
-            # 검증 데이터 가져오기
-            if self.data_loader is None:
-                logger.warning("⚠️ Data loader not initialized, skipping validation")
-                return
-                
-            val_data = self.data_loader.get_validation_data()
-            
-            if not val_data:
-                logger.warning("⚠️ No validation data available")
-                return
-            
-            # 검증 실행 (이미지 저장 포함)
+            logger.info(f"🔍 Running validation at iteration {iteration}...")
             if self.validator is None:
-                logger.warning("⚠️ Validator not initialized, skipping validation")
+                logger.warning("⚠️ Validator not available, skipping validation")
                 return
             
-            # 이미지 저장 설정 확인
-            save_images = self.config.get("output_settings", {}).get("save_images", True)
-            output_dir = self.config.get("output_settings", {}).get("output_dir", "vlm_grpo_results")
+            val_results = self.validator.evaluate()
+            logger.info(f"✅ Validation complete - Score: {val_results.get('avg_score', 0.0):.4f}")
             
-            val_results = self.validator.evaluate_batch(
-                val_data[:10],  # 처음 10개만
-                save_images=save_images,
-                output_dir=output_dir,
-                iteration=iteration
-            )
-            
-            # 결과 로깅
-            logger.info(f"📊 Validation Results (Iteration {iteration}):")
-            for metric, value in val_results.items():
-                if isinstance(value, (int, float)):
-                    logger.info(f"  - {metric}: {value:.4f}")
-            
-            # 이미지 저장 결과 로깅
-            if save_images and val_results.get('saved_images'):
-                saved_count = len(val_results['saved_images'])
-                logger.info(f"💾 Saved {saved_count} validation images")
-                
-                # 저장된 이미지 정보 로깅 (처음 3개만)
-                for i, img_info in enumerate(val_results['saved_images'][:3]):
-                    logger.info(f"  📸 Image {i+1}:")
-                    logger.info(f"    Original: '{img_info['prompt'][:30]}...'")
-                    logger.info(f"    Enhanced: '{img_info['enhanced_prompt'][:50]}...'")
-                    logger.info(f"    Enhanced Path: {img_info['image_path']}")
-                    if 'saved_original_path' in img_info:
-                        logger.info(f"    Original Path: {img_info['saved_original_path']}")
-                    if 'saved_prompts_path' in img_info:
-                        logger.info(f"    Prompts File: {img_info['saved_prompts_path']}")
-                    logger.info(f"    CLIP Score: {img_info['clip_score']:.3f}")
-                    logger.info("")
-            
-            # Wandb 로깅
-            if hasattr(self, 'wandb_logger') and self.wandb_logger:
-                self.wandb_logger.log_validation_results(val_results)
-                
-                # 이미지도 wandb에 업로드 (가능한 경우)
-                if save_images and val_results.get('saved_images'):
-                    try:
-                        from PIL import Image
-                        images_for_wandb = []
-                        captions_for_wandb = []
-                        
-                        for img_info in val_results['saved_images'][:5]:  # 처음 5개만
-                            try:
-                                img_path = img_info['image_path']
-                                if os.path.exists(img_path):
-                                    pil_image = Image.open(img_path)
-                                    images_for_wandb.append(pil_image)
-                                    caption = f"Iter {iteration}: {img_info['prompt'][:30]}... (CLIP: {img_info['clip_score']:.3f})"
-                                    captions_for_wandb.append(caption)
-                            except Exception as e:
-                                logger.warning(f"⚠️ Failed to load image for wandb: {e}")
-                        
-                        if images_for_wandb:
-                            self.wandb_logger.log_images(images_for_wandb, captions_for_wandb, step=iteration)
-                            logger.info(f"📈 Uploaded {len(images_for_wandb)} images to wandb")
-                            
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to upload images to wandb: {e}")
+            if self.wandb_logger is not None:
+                self.wandb_logger.log_metrics({
+                    'val_score': val_results.get('avg_score', 0.0),
+                    'val_iteration': iteration
+                })
                 
         except Exception as e:
             logger.error(f"❌ Validation failed: {e}")
     
     def _save_checkpoint(self, iteration: int):
         """체크포인트 저장"""
-        if self.grpo_trainer is None:
-            logger.warning("⚠️ GRPO trainer not initialized, skipping checkpoint save")
-            return
-            
         try:
-            checkpoint_path = f"{self.config['output_settings']['output_dir']}/checkpoint_iter_{iteration}.pt"
-            self.grpo_trainer.save_checkpoint(checkpoint_path)
+            checkpoint_dir = Path("checkpoints")
+            checkpoint_dir.mkdir(exist_ok=True)
+            
+            checkpoint_path = checkpoint_dir / f"grpo_checkpoint_iter_{iteration}.pt"
+            self.grpo_trainer.save_checkpoint(str(checkpoint_path))
+            
             logger.info(f"💾 Checkpoint saved: {checkpoint_path}")
+            
         except Exception as e:
             logger.error(f"❌ Failed to save checkpoint: {e}")
     
     def _save_best_model(self, iteration: int):
         """최고 성능 모델 저장"""
-        if self.grpo_trainer is None:
-            logger.warning("⚠️ GRPO trainer not initialized, skipping best model save")
-            return
-            
         try:
-            best_model_path = f"{self.config['output_settings']['output_dir']}/best_model.pt"
-            self.grpo_trainer.save_checkpoint(best_model_path)
+            best_model_dir = Path("best_models")
+            best_model_dir.mkdir(exist_ok=True)
+            
+            best_model_path = best_model_dir / f"best_grpo_model_iter_{iteration}.pt"
+            self.grpo_trainer.save_checkpoint(str(best_model_path))
+            
             logger.info(f"🏆 Best model saved: {best_model_path}")
+            
         except Exception as e:
             logger.error(f"❌ Failed to save best model: {e}")
     
     def _save_final_results(self):
         """최종 결과 저장"""
         try:
-            results_path = f"{self.config['output_settings']['output_dir']}/final_results.json"
+            results_dir = Path("results")
+            results_dir.mkdir(exist_ok=True)
             
-            # 학습 통계 수집
-            final_stats = self.training_stats.copy()
+            # 학습 통계 저장
+            import json
+            stats_path = results_dir / "training_stats.json"
+            with open(stats_path, 'w') as f:
+                json.dump({
+                    **self.training_stats,
+                    'iteration_rewards': self.iteration_rewards,
+                    'iteration_policy_losses': self.iteration_policy_losses,
+                    'iteration_entropies': self.iteration_entropies,
+                    'iteration_kl_divs': self.iteration_kl_divs
+                }, f, indent=2)
             
-            # GRPO 통계 추가 (있다면)
-            if self.grpo_trainer is not None and hasattr(self.grpo_trainer, 'get_training_stats'):
-                grpo_stats = self.grpo_trainer.get_training_stats()
-                final_stats.update(grpo_stats)
+            logger.info(f"📊 Training statistics saved: {stats_path}")
             
-            # 결과 저장
-            with open(results_path, 'w', encoding='utf-8') as f:
-                json.dump(final_stats, f, indent=2, ensure_ascii=False)
+            # 최종 모델 저장
+            final_model_path = results_dir / "final_grpo_model.pt"
+            self.grpo_trainer.save_checkpoint(str(final_model_path))
             
-            logger.info(f"📋 Final results saved: {results_path}")
+            logger.info(f"💾 Final model saved: {final_model_path}")
             
         except Exception as e:
             logger.error(f"❌ Failed to save final results: {e}")
 
-
 def main():
     """메인 실행 함수"""
-    print("🚀 VLM GRPO System Starting...")
-    print("=" * 50)
-    
     try:
-        # 시스템 초기화
+        # VLM GRPO System 초기화
         system = VLMGRPOSystem()
         
         # 컴포넌트 초기화
@@ -607,14 +503,11 @@ def main():
         # 학습 실행
         system.run_training()
         
-        print("\n✅ Training completed successfully!")
-        
     except KeyboardInterrupt:
-        print("\n⚠️ Training interrupted by user")
+        logger.info("⏹️ Training interrupted by user")
     except Exception as e:
-        print(f"\n❌ Training failed: {e}")
+        logger.error(f"❌ Training failed: {e}")
         raise
-
 
 if __name__ == "__main__":
     main() 
