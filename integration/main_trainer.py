@@ -30,17 +30,50 @@ import json
 sys.path.append(str(Path(__file__).parent.parent))
 
 # 각 모듈 임포트
+VLMWrapper = None
+SD3Generator = None
+CLIPRewardCalculator = None
+MultiRewardCalculator = None
+GRPOTrainer = None
+GRPOConfig = None
+PromptDataLoader = None
+ValidationEvaluator = None
+WandbLogger = None
+
 try:
     from models.vlm_wrapper import VLMWrapper
+except ImportError as e:
+    print(f"⚠️ VLMWrapper import warning: {e}")
+
+try:
     from models.sd_generator import SD3Generator  
+except ImportError as e:
+    print(f"⚠️ SD3Generator import warning: {e}")
+
+try:
     from models.clip_reward import CLIPRewardCalculator, MultiRewardCalculator
+except ImportError as e:
+    print(f"⚠️ CLIP modules import warning: {e}")
+
+try:
     from training.grpo_trainer import GRPOTrainer, GRPOConfig
+except ImportError as e:
+    print(f"⚠️ GRPO modules import warning: {e}")
+
+try:
     from utils.data_loader import PromptDataLoader
+except ImportError as e:
+    print(f"⚠️ DataLoader import warning: {e}")
+
+try:
     from evaluation.validator import ValidationEvaluator
+except ImportError as e:
+    print(f"⚠️ Validator import warning: {e}")
+
+try:
     from integration.wandb_logger import WandbLogger
 except ImportError as e:
-    print(f"⚠️ Import warning: {e}")
-    print("일부 모듈을 찾을 수 없습니다. 실제 실행 시에는 모든 의존성이 설치되어 있어야 합니다.")
+    print(f"⚠️ WandbLogger import warning: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +203,8 @@ class VLMGRPOSystem:
             
             # 1. VLM 초기화
             logger.info("📝 Initializing VLM...")
+            if VLMWrapper is None:
+                raise ImportError("VLMWrapper not available. Please install required dependencies.")
             self.vlm = VLMWrapper(
                 model_name=self.config["vlm_model"],
                 device=self.config["device"]
@@ -177,6 +212,8 @@ class VLMGRPOSystem:
             
             # 2. SD3 Generator 초기화
             logger.info("🎨 Initializing SD3 Generator...")
+            if SD3Generator is None:
+                raise ImportError("SD3Generator not available. Please install required dependencies.")
             self.sd_generator = SD3Generator(
                 model_name=self.config["sd_model"],
                 device=self.config["device"]
@@ -184,29 +221,38 @@ class VLMGRPOSystem:
             
             # 3. CLIP Reward Calculator 초기화
             logger.info("🏆 Initializing CLIP Reward Calculator...")
+            if CLIPRewardCalculator is None:
+                raise ImportError("CLIPRewardCalculator not available. Please install required dependencies.")
             self.clip_calculator = CLIPRewardCalculator(
                 model_name=self.config["clip_model"],
                 device=self.config["device"]
             )
             
             # 4. Multi Reward Calculator 초기화
+            if MultiRewardCalculator is None:
+                raise ImportError("MultiRewardCalculator not available. Please install required dependencies.")
             self.multi_reward_calculator = MultiRewardCalculator(
                 self.clip_calculator
             )
             
             # 5. GRPO Trainer 초기화
             logger.info("🎯 Initializing GRPO Trainer...")
+            if GRPOTrainer is None or GRPOConfig is None:
+                raise ImportError("GRPO modules not available. Please install required dependencies.")
             grpo_config = GRPOConfig(
                 learning_rate=self.config["learning_rate"],
                 group_size=self.config["group_size"],
-                num_iterations=self.config["num_iterations"],
-                grpo_epochs=self.config["grpo_epochs"],
-                device=self.config["device"]
+                grpo_epochs=self.config["grpo_epochs"]
             )
-            self.grpo_trainer = GRPOTrainer(self.vlm, grpo_config)
+            self.grpo_trainer = GRPOTrainer(
+                vlm_model=self.vlm,
+                config=grpo_config
+            )
             
             # 6. Data Loader 초기화
             logger.info("📊 Initializing Data Loader...")
+            if PromptDataLoader is None:
+                raise ImportError("PromptDataLoader not available. Please install required dependencies.")
             self.data_loader = PromptDataLoader(
                 train_data_path=self.config["train_data_path"],
                 val_data_path=self.config["val_data_path"]
@@ -214,6 +260,8 @@ class VLMGRPOSystem:
             
             # 7. Validator 초기화
             logger.info("✅ Initializing Validator...")
+            if ValidationEvaluator is None:
+                raise ImportError("ValidationEvaluator not available. Please install required dependencies.")
             self.validator = ValidationEvaluator(
                 vlm=self.vlm,
                 sd_generator=self.sd_generator,
@@ -221,18 +269,21 @@ class VLMGRPOSystem:
             )
             
             # 8. Wandb Logger 초기화 (선택적)
-            if self.config["use_wandb"]:
+            if self.config.get("use_wandb", False):
                 logger.info("📈 Initializing Wandb Logger...")
-                self.wandb_logger = WandbLogger(
-                    project=self.config["wandb_project"],
-                    entity=self.config["wandb_entity"],
-                    config=self.config
-                )
+                if WandbLogger is None:
+                    logger.warning("⚠️ WandbLogger not available, skipping wandb initialization")
+                else:
+                    self.wandb_logger = WandbLogger(
+                        project=self.config.get("wandb_project", "vlm-grpo"),
+                        entity=self.config.get("wandb_entity", None),
+                        config=self.config
+                    )
             
             # 출력 디렉토리 생성
             os.makedirs(self.config["output_dir"], exist_ok=True)
             
-            logger.info("✅ All components initialized successfully!")
+            logger.info("✅ All components initialized successfully")
             
         except Exception as e:
             logger.error(f"❌ Component initialization failed: {e}")

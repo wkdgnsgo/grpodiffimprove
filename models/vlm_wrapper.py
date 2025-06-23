@@ -2,7 +2,7 @@
 VLM (Vision Language Model) Wrapper
 ===================================
 
-VLM을 사용하여 사용자의 간단한 프롬프트를 상세하고 품질 높은 프롬프트로 개선하는 모듈입니다.
+Qwen2.5-VL을 사용하여 사용자의 간단한 프롬프트를 상세하고 품질 높은 프롬프트로 개선하는 모듈입니다.
 
 주요 기능:
 1. 프롬프트 개선 (Prompt Enhancement)
@@ -16,7 +16,7 @@ Date: 2025-01-22
 
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from typing import List, Dict, Optional, Union
 import logging
 
@@ -24,112 +24,154 @@ logger = logging.getLogger(__name__)
 
 class VLMWrapper(nn.Module):
     """
-    VLM을 래핑하여 프롬프트 개선 기능을 제공하는 클래스
+    Qwen2.5-VL을 래핑하여 프롬프트 개선 기능을 제공하는 클래스
     
     이 클래스는 사용자의 간단한 프롬프트 (예: "a cat")를 받아서
     더 상세하고 구체적인 프롬프트 (예: "a fluffy orange tabby cat sitting gracefully...")로 
     변환하는 기능을 제공합니다.
     
     Attributes:
-        model_name (str): 사용할 VLM 모델 이름
+        model_name (str): 사용할 Qwen2.5-VL 모델 이름
         tokenizer: 토크나이저 객체
-        model: VLM 모델 객체
+        processor: 프로세서 객체
+        model: Qwen2.5-VL 모델 객체
         device: 연산 디바이스 (MPS/CUDA/CPU)
         generation_config (dict): 텍스트 생성 설정
     """
     
-    def __init__(self, 
-                 model_name: str = "microsoft/DialoGPT-medium",
+    def __init__(self,
+                 model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct",
                  device: str = "auto",
-                 max_new_tokens: int = 50,
-                 temperature: float = 0.8,
-                 top_p: float = 0.9):
+                 max_new_tokens: int = 100,
+                 temperature: float = 0.7,
+                 top_p: float = 0.9,
+                 do_sample: bool = True):
         """
         VLM Wrapper 초기화
         
         Args:
-            model_name (str): 사용할 VLM 모델 이름
+            model_name (str): 사용할 Qwen2.5-VL 모델 이름
             device (str): 디바이스 설정 ("auto", "mps", "cuda", "cpu")
             max_new_tokens (int): 생성할 최대 토큰 수
-            temperature (float): 생성 다양성 조절 (0.0-1.0)
-            top_p (float): 누적 확률 임계값 (0.0-1.0)
+            temperature (float): 생성 온도 (다양성 vs 일관성)
+            top_p (float): 누적 확률 임계값
+            do_sample (bool): 샘플링 여부
         """
         super().__init__()
         
         self.model_name = model_name
-        self.max_new_tokens = max_new_tokens
-        self.temperature = temperature
-        self.top_p = top_p
         
-        # 디바이스 자동 선택 (Apple Silicon MPS > CUDA > CPU 순서)
+        # 디바이스 자동 선택
         if device == "auto":
             if torch.backends.mps.is_available():
                 self.device = torch.device("mps")
-                logger.info("🍎 Using Apple Silicon MPS")
+                logger.info("🍎 Using Apple Silicon MPS for Qwen2.5-VL")
             elif torch.cuda.is_available():
                 self.device = torch.device("cuda")
-                logger.info("🚀 Using CUDA GPU")
+                logger.info("🚀 Using CUDA GPU for Qwen2.5-VL")
             else:
                 self.device = torch.device("cpu")
-                logger.info("💻 Using CPU")
+                logger.info("💻 Using CPU for Qwen2.5-VL")
         else:
             self.device = torch.device(device)
-            logger.info(f"🔧 Using specified device: {device}")
-        
-        # 모델과 토크나이저 로드
-        self._load_model()
         
         # 텍스트 생성 설정
         self.generation_config = {
-            'max_new_tokens': self.max_new_tokens,
-            'temperature': self.temperature,
-            'top_p': self.top_p,
-            'do_sample': True,
-            'pad_token_id': self.tokenizer.eos_token_id,
-            'repetition_penalty': 1.1,  # 반복 방지
-            'length_penalty': 1.0,      # 길이 페널티
-            'early_stopping': True      # 조기 종료
+            'max_new_tokens': max_new_tokens,
+            'temperature': temperature,
+            'top_p': top_p,
+            'do_sample': do_sample,
+            'pad_token_id': None,  # 모델 로드 후 설정
+            'eos_token_id': None,  # 모델 로드 후 설정
         }
+        
+        # 모델 로드
+        self._load_model()
     
     def _load_model(self):
         """
-        VLM 모델과 토크나이저를 로드하는 내부 메서드
+        Qwen2.5-VL 모델과 토크나이저를 로드하는 내부 메서드
         
         이 메서드는:
-        1. 토크나이저 로드 및 설정
-        2. 모델 로드 및 디바이스 이동
-        3. 평가 모드 설정
-        4. 에러 처리
+        1. 토크나이저 로드
+        2. 프로세서 로드
+        3. Qwen2.5-VL 모델 로드
+        4. 디바이스 설정
+        5. 토큰 ID 설정
         """
         try:
-            logger.info(f"📥 Loading VLM model: {self.model_name}")
+            logger.info(f"📥 Loading Qwen2.5-VL model: {self.model_name}")
             
             # 토크나이저 로드
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name,
+                trust_remote_code=True,
+                padding_side="left"
+            )
+            
+            # 프로세서 로드
+            self.processor = AutoProcessor.from_pretrained(
+                self.model_name,
                 trust_remote_code=True
             )
             
-            # 패딩 토큰 설정 (없는 경우 EOS 토큰 사용)
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-            
             # 모델 로드
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.model_name,
                 trust_remote_code=True,
-                torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32
+                torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32,
+                device_map="auto" if self.device.type == 'cuda' else None
             )
             
-            # 디바이스로 이동
-            self.model = self.model.to(self.device)
-            self.model.eval()  # 평가 모드 설정
+            # 디바이스로 이동 (device_map이 없는 경우)
+            if self.device.type != 'cuda':
+                self.model = self.model.to(self.device)
             
-            logger.info(f"✅ VLM model loaded successfully on {self.device}")
+            # 평가 모드 설정
+            self.model.eval()
+            
+            # 토큰 ID 설정
+            if self.tokenizer.pad_token_id is None:
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+            
+            self.generation_config['pad_token_id'] = self.tokenizer.pad_token_id
+            self.generation_config['eos_token_id'] = self.tokenizer.eos_token_id
+            
+            logger.info(f"✅ Qwen2.5-VL model loaded successfully on {self.device}")
             
         except Exception as e:
-            logger.error(f"❌ Failed to load VLM model: {e}")
-            raise RuntimeError(f"VLM model loading failed: {e}")
+            logger.error(f"❌ Failed to load Qwen2.5-VL model: {e}")
+            logger.info("🔄 Trying fallback loading method...")
+            
+            # 대안 로딩 방식 (일반 AutoTokenizer 사용)
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    "Qwen/Qwen2.5-7B-Instruct",
+                    trust_remote_code=True
+                )
+                
+                # 간단한 텍스트 생성 모델로 대체
+                from transformers import AutoModelForCausalLM
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    "Qwen/Qwen2.5-7B-Instruct",
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32
+                )
+                
+                self.model = self.model.to(self.device)
+                self.model.eval()
+                
+                if self.tokenizer.pad_token_id is None:
+                    self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+                
+                self.generation_config['pad_token_id'] = self.tokenizer.pad_token_id
+                self.generation_config['eos_token_id'] = self.tokenizer.eos_token_id
+                
+                logger.info(f"✅ Fallback model loaded successfully on {self.device}")
+                
+            except Exception as e2:
+                logger.error(f"❌ Fallback loading also failed: {e2}")
+                raise RuntimeError(f"Qwen2.5-VL model loading failed: {e} | Fallback: {e2}")
     
     def enhance_prompt(self, user_prompt: str) -> str:
         """
@@ -137,7 +179,7 @@ class VLMWrapper(nn.Module):
         
         이 메서드는 간단한 프롬프트를 받아서:
         1. 프롬프트 템플릿 적용
-        2. VLM으로 텍스트 생성
+        2. Qwen2.5-VL로 텍스트 생성
         3. 후처리 및 정제
         4. 개선된 프롬프트 반환
         
@@ -156,25 +198,44 @@ class VLMWrapper(nn.Module):
             # 프롬프트 템플릿 적용
             enhanced_prompt_template = self._create_enhancement_template(user_prompt)
         
+            # Qwen2.5-VL 스타일 메시지 형식
+            messages = [
+                {
+                    "role": "system", 
+                    "content": "You are an expert in creating detailed, artistic image generation prompts. Transform simple prompts into rich, descriptive ones."
+                },
+                {
+                    "role": "user", 
+                    "content": enhanced_prompt_template
+                }
+            ]
+            
+            # 채팅 템플릿 적용
+            text = self.processor.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True
+            )
+            
             # 토크나이징
-            inputs = self.tokenizer.encode(
-                enhanced_prompt_template,
-                return_tensors="pt",
+            inputs = self.processor(
+                text=[text],
+                images=None,  # 텍스트만 처리
                 padding=True,
-                truncation=True,
-                max_length=512
+                return_tensors="pt"
             ).to(self.device)
         
             # 텍스트 생성
             with torch.no_grad():
                 outputs = self.model.generate(
-                    inputs,
+                    **inputs,
                     **self.generation_config
                 )
         
             # 디코딩 및 후처리
-            generated_text = self.tokenizer.decode(
-                outputs[0], 
+            output_ids = outputs[0][inputs.input_ids.shape[1]:]
+            generated_text = self.processor.decode(
+                output_ids, 
                 skip_special_tokens=True
             )
         
@@ -216,7 +277,7 @@ class VLMWrapper(nn.Module):
         """
         프롬프트 개선을 위한 템플릿 생성
         
-        이 메서드는 VLM이 더 나은 프롬프트를 생성하도록 유도하는
+        이 메서드는 Qwen2.5-VL이 더 나은 프롬프트를 생성하도록 유도하는
         템플릿을 만듭니다.
         
         Args:
@@ -240,7 +301,7 @@ class VLMWrapper(nn.Module):
         생성된 텍스트에서 개선된 프롬프트 부분만 추출
         
         Args:
-            generated_text (str): VLM이 생성한 전체 텍스트
+            generated_text (str): Qwen2.5-VL이 생성한 전체 텍스트
             template (str): 사용된 템플릿
             
         Returns:
@@ -276,9 +337,9 @@ class VLMWrapper(nn.Module):
     
     def _fallback_enhancement(self, user_prompt: str) -> str:
         """
-        VLM 개선 실패 시 사용할 기본 개선 방법
+        Qwen2.5-VL 개선 실패 시 사용할 기본 개선 방법
         
-        이 메서드는 VLM이 실패했을 때 규칙 기반으로
+        이 메서드는 Qwen2.5-VL이 실패했을 때 규칙 기반으로
         기본적인 프롬프트 개선을 수행합니다.
         
         Args:
@@ -337,10 +398,10 @@ if __name__ == "__main__":
     try:
         # VLM 래퍼 초기화
         vlm = VLMWrapper(
-            model_name="microsoft/DialoGPT-medium",
+            model_name="Qwen/Qwen2.5-VL-7B-Instruct",
             device="auto",
-            max_new_tokens=30,
-            temperature=0.8
+            max_new_tokens=100,
+            temperature=0.7
         )
         
         print("✅ VLM Wrapper initialized successfully")

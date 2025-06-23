@@ -4,8 +4,8 @@
 
   "model_settings": {
     "_comment": "모델 관련 설정",
-    "vlm_model": "microsoft/DialoGPT-medium",
-    "sd_model": "runwayml/stable-diffusion-v1-5",
+    "vlm_model": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "sd_model": "stabilityai/stable-diffusion-3-medium",
     "clip_model": "openai/clip-vit-base-patch32"
   },
 

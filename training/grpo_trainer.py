@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+
 from typing import List, Dict, Tuple, Optional, Any
 import logging
 import numpy as np
@@ -392,7 +393,7 @@ class GRPOTrainer:
         
         # 손실 계산
         policy_loss = 0.0
-        kl_div = 0.0
+        kl_div_estimates = []  # KL divergence estimates for batch average
         entropy = 0.0
         
         for i in range(len(group_data['prompts'])):
@@ -408,24 +409,45 @@ class GRPOTrainer:
             surr2 = torch.clamp(ratio, 1 - self.config.clip_epsilon, 1 + self.config.clip_epsilon) * advantage
             policy_loss_i = -torch.min(surr1, surr2)
             
-            # KL 발산 (근사치)
-            kl_div_i = log_ratio  # 근사: log(π/π_ref) ≈ KL(π_ref, π)
+            # --- Calculate KL Divergence Penalty ---
+            # Calculate KL divergence using the unbiased estimator
+            # D_KL = (pi_ref / pi_theta) - log(pi_ref / pi_theta) - 1
+            #      = exp(log_probs_ref - log_probs_new) - (log_probs_ref - log_probs_new) - 1
             
-            # 엔트로피 (간소화)
-            entropy_i = -current_log_probs[i]  # 간소화된 엔트로피
+            log_prob_ref = group_data['ref_log_probs'][i] 
+            log_prob_curr = current_log_probs[i]
+            
+            # Use detached version for KL calculation to prevent grads flowing through KL term incorrectly
+            # The gradient should only come from the direct dependence of the main objective on pi_theta
+            log_ratio_ref_curr = log_prob_ref - log_prob_curr.detach()
+            
+            # Unbiased KL divergence estimator
+            kl_div_i = torch.exp(log_ratio_ref_curr) - log_ratio_ref_curr - 1
+            
+            # Ensure KL estimate is non-negative (it should be theoretically)
+            kl_div_i = torch.relu(kl_div_i)
+            
+            # 엔트로피 (현재 정책의 엔트로피)
+            # H(π_θ) = -E_{π_θ}[log(π_θ)]
+            entropy_i = -log_prob_curr
             
             policy_loss += policy_loss_i
-            kl_div += kl_div_i
+            kl_div_estimates.append(kl_div_i)
             entropy += entropy_i
         
         # 배치 크기로 정규화
         batch_size = len(group_data['prompts'])
         policy_loss /= batch_size
-        kl_div /= batch_size
         entropy /= batch_size
         
+        # Calculate mean KL divergence for the batch
+        if len(kl_div_estimates) > 0:
+            kl_div_estimate_mean = torch.stack(kl_div_estimates).mean()
+        else:
+            kl_div_estimate_mean = torch.tensor(0.0, device=self.device)
+        
         # 총 손실: 정책 손실 + KL 페널티 - 엔트로피 보너스
-        total_loss = policy_loss + self.config.kl_beta * kl_div - self.config.entropy_coeff * entropy
+        total_loss = policy_loss + self.config.kl_beta * kl_div_estimate_mean - self.config.entropy_coeff * entropy
         
         # 역전파
         total_loss.backward()
@@ -438,7 +460,7 @@ class GRPOTrainer:
         
         return {
             'policy_loss': policy_loss.item(),
-            'kl_div': kl_div.item(),
+            'kl_div': kl_div_estimate_mean.item(),
             'entropy': entropy.item(),
             'total_loss': total_loss.item()
         }

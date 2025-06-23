@@ -15,7 +15,7 @@ Date: 2025-01-22
 """
 
 import torch
-from diffusers import StableDiffusion3Pipeline
+from diffusers import StableDiffusion3Pipeline, DiffusionPipeline
 from PIL import Image
 from typing import List, Dict, Optional, Union, Tuple
 import logging
@@ -39,22 +39,22 @@ class SD3Generator:
     """
     
     def __init__(self,
-                 model_name: str = "runwayml/stable-diffusion-v1-5",
+                 model_name: str = "stabilityai/stable-diffusion-3-medium",
                  device: str = "auto",
-                 height: int = 512,
-                 width: int = 512,
-                 num_inference_steps: int = 20,
-                 guidance_scale: float = 7.5):
+                 height: int = 1024,
+                 width: int = 1024,
+                 num_inference_steps: int = 28,
+                 guidance_scale: float = 7.0):
         """
         SD3 Generator 초기화
         
         Args:
-            model_name (str): 사용할 SD 모델 이름
+            model_name (str): 사용할 SD3 모델 이름
             device (str): 디바이스 설정 ("auto", "mps", "cuda", "cpu")
-            height (int): 생성할 이미지 높이
+            height (int): 생성할 이미지 높이 (SD3는 1024x1024 권장)
             width (int): 생성할 이미지 너비
-            num_inference_steps (int): 추론 스텝 수 (품질 vs 속도)
-            guidance_scale (float): 가이던스 스케일 (프롬프트 충실도)
+            num_inference_steps (int): 추론 스텝 수 (SD3는 28스텝 권장)
+            guidance_scale (float): 가이던스 스케일 (SD3는 7.0 권장)
         """
         self.model_name = model_name
         self.height = height
@@ -76,15 +76,15 @@ class SD3Generator:
         else:
             self.device = device
         
-        # 이미지 생성 설정
+        # SD3 특화 이미지 생성 설정
         self.generation_config = {
             'height': self.height,
             'width': self.width,
             'num_inference_steps': self.num_inference_steps,
             'guidance_scale': self.guidance_scale,
             'num_images_per_prompt': 1,
-            'eta': 0.0,  # DDIM eta parameter
             'generator': None,  # 재현 가능한 결과를 위해 시드 설정 가능
+            'max_sequence_length': 256,  # SD3 특화 설정
         }
         
         # 파이프라인 로드
@@ -92,10 +92,10 @@ class SD3Generator:
     
     def _load_pipeline(self):
         """
-        Stable Diffusion 파이프라인을 로드하는 내부 메서드
+        Stable Diffusion 3 파이프라인을 로드하는 내부 메서드
         
         이 메서드는:
-        1. SD 파이프라인 로드
+        1. SD3 파이프라인 로드
         2. 디바이스 설정
         3. 메모리 최적화 설정
         4. 안전 체크 비활성화 (연구용)
@@ -103,13 +103,23 @@ class SD3Generator:
         try:
             logger.info(f"📥 Loading SD3 pipeline: {self.model_name}")
             
-            # SD 파이프라인 로드
-            self.pipeline = StableDiffusion3Pipeline.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
-                use_safetensors=True,
-                variant="fp16" if self.device in ['cuda', 'mps'] else None
-            )
+            # SD3 모델인지 확인하여 적절한 로딩 방식 선택
+            if "stable-diffusion-3" in self.model_name.lower():
+                # SD3 전용 로딩 방식
+                self.pipeline = StableDiffusion3Pipeline.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
+                    text_encoder_3=None,  # T5 텍스트 인코더 비활성화 (메모리 절약)
+                    transformer=None,  # 필요시 커스텀 트랜스포머 사용
+                )
+            else:
+                # 일반 SD 모델 로딩
+                self.pipeline = DiffusionPipeline.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
+                    use_safetensors=True,
+                    variant="fp16" if self.device in ['cuda', 'mps'] else None
+                )
             
             # 디바이스로 이동
             self.pipeline = self.pipeline.to(self.device)
@@ -120,18 +130,35 @@ class SD3Generator:
                 self.pipeline.enable_attention_slicing()
             elif self.device == "cuda":
                 # CUDA 최적화
-                self.pipeline.enable_memory_efficient_attention()
+                if hasattr(self.pipeline, 'enable_memory_efficient_attention'):
+                    self.pipeline.enable_memory_efficient_attention()
                 self.pipeline.enable_attention_slicing()
             
             # 안전 체크 비활성화 (연구 목적)
-            self.pipeline.safety_checker = None
-            self.pipeline.requires_safety_checker = False
+            if hasattr(self.pipeline, 'safety_checker'):
+                self.pipeline.safety_checker = None
+            if hasattr(self.pipeline, 'requires_safety_checker'):
+                self.pipeline.requires_safety_checker = False
             
             logger.info(f"✅ SD3 pipeline loaded successfully on {self.device}")
             
         except Exception as e:
             logger.error(f"❌ Failed to load SD3 pipeline: {e}")
-            raise RuntimeError(f"SD3 pipeline loading failed: {e}")
+            logger.info("🔄 Trying alternative loading method...")
+            
+            # 대안 로딩 방식
+            try:
+                self.pipeline = DiffusionPipeline.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
+                    use_safetensors=True,
+                )
+                self.pipeline = self.pipeline.to(self.device)
+                logger.info(f"✅ SD3 pipeline loaded with alternative method on {self.device}")
+                
+            except Exception as e2:
+                logger.error(f"❌ Alternative loading also failed: {e2}")
+                raise RuntimeError(f"SD3 pipeline loading failed: {e} | Alternative: {e2}")
     
     def generate_image(self, 
                       prompt: str, 
@@ -215,9 +242,9 @@ class SD3Generator:
         
         # 기본값 설정
         if negative_prompts is None:
-            negative_prompts = [None] * len(prompts)
+            negative_prompts = [None for _ in range(len(prompts))]
         if seeds is None:
-            seeds = [None] * len(prompts)
+            seeds = [None for _ in range(len(prompts))]
         
         # 각 프롬프트에 대해 이미지 생성
         for i, prompt in enumerate(prompts):
@@ -360,11 +387,11 @@ if __name__ == "__main__":
     try:
         # SD3 생성기 초기화
         generator = SD3Generator(
-            model_name="runwayml/stable-diffusion-v1-5",
+            model_name="stabilityai/stable-diffusion-3-medium",
             device="auto",
-            height=256,  # 테스트용 작은 크기
-            width=256,
-            num_inference_steps=10  # 테스트용 빠른 생성
+            height=1024,  # SD3 권장 크기
+            width=1024,
+            num_inference_steps=28  # SD3 권장 스텝 수
         )
         
         print("✅ SD3 Generator initialized successfully")
