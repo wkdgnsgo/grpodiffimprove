@@ -400,10 +400,16 @@ class GRPOTrainer:
         if len(advantages) > 1:
             advantage_std = np.std(advantages)
             if advantage_std > 1e-8:
-                advantages = (advantages - np.mean(advantages)) / advantage_std
-                logger.debug(f"📊 Normalized advantages: {advantages}")
+                # 정규화하되 평균을 0으로 만들지 않고 스케일만 조정
+                advantages = advantages / advantage_std
+                logger.debug(f"📊 Scaled advantages (std normalized): {advantages}")
             else:
-                logger.debug("📊 Advantage std too small, skipping normalization")
+                logger.debug("📊 Advantage std too small, using raw advantages")
+                # std가 너무 작으면 작은 랜덤 노이즈 추가
+                advantages = advantages + np.random.normal(0, 0.01, len(advantages))
+        else:
+            # 단일 샘플인 경우 기본값 설정
+            advantages = np.array([0.1]) if len(advantages) == 1 else advantages
         
         # 4. 확실하게 리스트로 변환 및 검증
         returns_list = []
@@ -551,8 +557,10 @@ class GRPOTrainer:
                 group_data['advantages'] = []
             
             while len(group_data['advantages']) < expected_length:
-                group_data['advantages'].append(torch.tensor(0.0, dtype=torch.float32))
-                logger.debug(f"⚠️ Added missing advantage, current length: {len(group_data['advantages'])}")
+                # 기본 advantage를 작은 랜덤 값으로 설정 (0이 아닌 값)
+                default_advantage = torch.tensor(np.random.normal(0.0, 0.1), dtype=torch.float32)
+                group_data['advantages'].append(default_advantage)
+                logger.debug(f"⚠️ Added default advantage {default_advantage:.4f}, current length: {len(group_data['advantages'])}")
             
             logger.info(f"✅ Pre-validation complete:")
             logger.info(f"  - prompts: {len(group_data['prompts'])}")
@@ -601,6 +609,18 @@ class GRPOTrainer:
                     surr2 = torch.clamp(ratio, 1 - self.config.clip_epsilon, 1 + self.config.clip_epsilon) * advantage
                     policy_loss_i = -torch.min(surr1, surr2)
                     
+                    # 디버깅: 중요한 값들 로그
+                    if i == 0:  # 첫 번째 샘플만 로그
+                        logger.debug(f"🔍 Sample 0 policy calculation:")
+                        logger.debug(f"  - current_log_prob: {current_log_prob}")
+                        logger.debug(f"  - ref_log_prob: {ref_log_prob}")
+                        logger.debug(f"  - advantage: {advantage}")
+                        logger.debug(f"  - log_ratio: {log_ratio}")
+                        logger.debug(f"  - ratio: {ratio}")
+                        logger.debug(f"  - surr1: {surr1}")
+                        logger.debug(f"  - surr2: {surr2}")
+                        logger.debug(f"  - policy_loss_i: {policy_loss_i}")
+                    
                     # KL divergence 계산 (수정된 공식)
                     log_ratio_ref_curr = ref_log_prob - current_log_prob.detach()
                     kl_div_i = torch.exp(log_ratio_ref_curr) - log_ratio_ref_curr - 1
@@ -622,6 +642,12 @@ class GRPOTrainer:
             if batch_size > 0:
                 policy_loss = policy_loss / batch_size
                 entropy = entropy / batch_size
+                
+            # 디버깅: 최종 손실 값들
+            logger.debug(f"🔍 Final loss calculation:")
+            logger.debug(f"  - Raw policy_loss: {policy_loss}")
+            logger.debug(f"  - Raw entropy: {entropy}")
+            logger.debug(f"  - Batch size: {batch_size}")
             
             # KL divergence 평균 계산
             if len(kl_div_estimates) > 0:
