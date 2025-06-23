@@ -215,3 +215,27 @@ Please note that you may need to restart your runtime after installation.
 2025-06-23 16:44:44,163 - models.vlm_wrapper - INFO - 📄 Loaded model name from config: Qwen/Qwen2.5-VL-7B-Instruct
 2025-06-23 16:44:44,163 - models.vlm_wrapper - INFO - 🍎 Using Apple Silicon MPS for Qwen2.5-VL
 2025-06-23 16:44:44,163 - models.vlm_wrapper - INFO - 📥 Loading Qwen2.5 model: Qwen/Qwen2.5-VL-7B-Instruct
+2025-06-23 16:52:48,471 - integration.main_trainer - INFO - 🚀 VLM GRPO System initialized
+2025-06-23 16:52:48,472 - integration.main_trainer - INFO - 🔧 Initializing components...
+2025-06-23 16:52:48,472 - integration.main_trainer - INFO - 📝 Initializing VLM...
+2025-06-23 16:52:48,472 - models.vlm_wrapper - INFO - 📄 VLM model name from config: Qwen/Qwen2.5-VL-7B-Instruct
+2025-06-23 16:52:48,472 - models.vlm_wrapper - INFO - ✅ VLM Wrapper initialized with placeholder-based enhancement
+2025-06-23 16:52:48,472 - integration.main_trainer - INFO - 🎨 Initializing SD3 Generator...
+2025-06-23 16:52:48,472 - models.sd_generator - INFO - 📄 Loaded SD model name from config: stabilityai/stable-diffusion-3-medium-diffusers
+2025-06-23 16:52:48,472 - models.sd_generator - INFO - 🍎 Using Apple Silicon MPS for SD3
+2025-06-23 16:52:48,472 - models.sd_generator - INFO - 📥 Loading SD3 pipeline: stabilityai/stable-diffusion-3-medium-diffusers
+2025-06-23 16:52:48,978 - models.sd_generator - WARNING - ⚠️ SD3 specific loading failed: 401 Client Error. (Request ID: Root=1-685907d1-2db04c487b7e70d36411d3c4;aff4f747-3a36-4ed4-811c-750497a3be19)
+
+Cannot access gated repo for url https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers/resolve/main/model_index.json.
+Access to model stabilityai/stable-diffusion-3-medium-diffusers is restricted. You must have access to it and be authenticated to access it. Please log in., trying generic method
+2025-06-23 16:52:49,409 - models.sd_generator - ERROR - ❌ Failed to load SD3 pipeline: 401 Client Error. (Request ID: Root=1-685907d1-320db07f203ffadb659dbe8b;ae55497a-2b31-4a02-9f9a-a8e762882f7c)
+
+Cannot access gated repo for url https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers/resolve/main/model_index.json.
+Access to model stabilityai/stable-diffusion-3-medium-diffusers is restricted. You must have access to it and be authenticated to access it. Please log in.
+2025-06-23 16:52:49,409 - models.sd_generator - INFO - 🔄 Trying alternative loading method...
+2025-06-23 16:52:49,848 - models.sd_generator - ERROR - ❌ Alternative loading also failed: 401 Client Error. (Request ID: Root=1-685907d1-44f4d9e40e59c1446bf04411;98b419e8-c7b0-40c3-ac4b-4336724566b4)
+
+Cannot access gated repo for url https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers/resolve/main/model_index.json.
+Access to model stabilityai/stable-diffusion-3-medium-diffusers is restricted. You must have access to it and be authenticated to access it. Please log in.
+2025-06-23 16:52:49,849 - models.sd_generator - WARNING - 🔄 Using fallback SD model...
+2025-06-23 16:52:49,849 - models.sd_generator - INFO - 📥 Loading fallback model: runwayml/stable-diffusion-v1-5

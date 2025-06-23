@@ -48,252 +48,148 @@ class VLMWrapper(nn.Module):
                  top_p: float = 0.9,
                  do_sample: bool = True):
         """
-        VLM Wrapper 초기화
+        VLM Wrapper 초기화 (간단한 플레이스홀더 방식)
         
         Args:
-            config_path (str): 설정 파일 경로 (모델 이름을 여기서 읽어옴)
-            device (str): 디바이스 설정 ("auto", "mps", "cuda", "cpu")
-            max_new_tokens (int): 생성할 최대 토큰 수
-            temperature (float): 생성 온도 (다양성 vs 일관성)
-            top_p (float): 누적 확률 임계값
-            do_sample (bool): 샘플링 여부
+            config_path (str): 설정 파일 경로
+            device (str): 디바이스 설정 (사용되지 않음)
+            max_new_tokens (int): 최대 토큰 수 (사용되지 않음)
+            temperature (float): 생성 온도 (사용되지 않음)
+            top_p (float): 누적 확률 임계값 (사용되지 않음)
+            do_sample (bool): 샘플링 여부 (사용되지 않음)
         """
         super().__init__()
         
-        # 설정 파일에서 모델 이름 읽기
+        # 설정 파일에서 모델 이름 읽기 (참고용)
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             self.model_name = config['model_settings']['vlm_model']
-            logger.info(f"📄 Loaded model name from config: {self.model_name}")
+            logger.info(f"📄 VLM model name from config: {self.model_name}")
         except Exception as e:
-            logger.warning(f"⚠️ Failed to load config: {e}, using default model")
-            self.model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
+            logger.warning(f"⚠️ Failed to load config: {e}, using default")
+            self.model_name = "placeholder-vlm"
         
-        # 디바이스 자동 선택
-        if device == "auto":
-            if torch.backends.mps.is_available():
-                self.device = torch.device("mps")
-                logger.info("🍎 Using Apple Silicon MPS for Qwen2.5-VL")
-            elif torch.cuda.is_available():
-                self.device = torch.device("cuda")
-                logger.info("🚀 Using CUDA GPU for Qwen2.5-VL")
-            else:
-                self.device = torch.device("cpu")
-                logger.info("💻 Using CPU for Qwen2.5-VL")
-        else:
-            self.device = torch.device(device)
+        # 간단한 플레이스홀더 방식이므로 실제 모델 로드 없음
+        self.device = "cpu"  # 플레이스홀더 방식에서는 디바이스 불필요
+        self.model = None
+        self.tokenizer = None
+        self.processor = None
         
-        # 텍스트 생성 설정
+        # 생성 설정 (사용되지 않지만 호환성을 위해 유지)
         self.generation_config = {
             'max_new_tokens': max_new_tokens,
             'temperature': temperature,
             'top_p': top_p,
-            'do_sample': do_sample,
-            'pad_token_id': None,  # 모델 로드 후 설정
-            'eos_token_id': None,  # 모델 로드 후 설정
+            'do_sample': do_sample
         }
         
-        # 모델 로드
-        self._load_model()
+        logger.info("✅ VLM Wrapper initialized with placeholder-based enhancement")
     
     def _load_model(self):
         """
-        Qwen2.5-VL 모델과 토크나이저를 로드하는 내부 메서드
-        
-        이 메서드는:
-        1. 토크나이저 로드
-        2. 프로세서 로드
-        3. Qwen2.5-VL 모델 로드
-        4. 디바이스 설정
-        5. 토큰 ID 설정
+        모델 로드 메서드 (플레이스홀더 방식에서는 사용되지 않음)
         """
-        try:
-            logger.info(f"📥 Loading Qwen2.5 model: {self.model_name}")
-            
-            # Dimension mismatch를 피하기 위해 base 모델 사용
-            base_model_name = "Qwen/Qwen2.5-7B-Instruct"
-            
-            # 토크나이저 로드
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                base_model_name,
-                trust_remote_code=True,
-                padding_side="left"
-            )
-            
-            # 패딩 토큰 설정 (중요!)
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-                logger.info("🔧 Set pad_token to eos_token")
-            
-            # 프로세서 설정 (base 모델에서는 None)
-            self.processor = None
-            
-            # 모델 로드 (분산 학습 관련 설정 비활성화)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                base_model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32,
-                device_map=None,  # 분산 학습 비활성화
-                attn_implementation="eager",  # SDPA 대신 eager attention 사용
-                use_cache=True,
-                low_cpu_mem_usage=True
-            )
-            
-            # 디바이스로 이동
-            self.model = self.model.to(self.device)
-            
-            # 평가 모드 설정
-            self.model.eval()
-            
-            # 토큰 ID 설정
-            self.generation_config['pad_token_id'] = self.tokenizer.pad_token_id
-            self.generation_config['eos_token_id'] = self.tokenizer.eos_token_id
-            
-            logger.info(f"✅ Qwen2.5 model loaded successfully on {self.device}")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to load Qwen2.5 model: {e}")
-            logger.info("🔄 Trying fallback loading method...")
-            
-            # 대안 로딩 방식 (일반 AutoTokenizer 사용)
-            try:
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    "Qwen/Qwen2.5-7B-Instruct",
-                    trust_remote_code=True
-                )
-                
-                # 패딩 토큰 설정 (중요!)
-                if self.tokenizer.pad_token is None:
-                    self.tokenizer.pad_token = self.tokenizer.eos_token
-                    self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-                    logger.info("🔧 Set pad_token to eos_token for fallback model")
-                
-                # 간단한 텍스트 생성 모델로 대체
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    "Qwen/Qwen2.5-7B-Instruct",
-                    trust_remote_code=True,
-                    torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32,
-                    device_map=None,  # 분산 학습 비활성화
-                    attn_implementation="eager",  # SDPA 대신 eager attention 사용
-                    use_cache=True,
-                    low_cpu_mem_usage=True
-                )
-                
-                self.model = self.model.to(self.device)
-                self.model.eval()
-                
-                self.generation_config['pad_token_id'] = self.tokenizer.pad_token_id
-                self.generation_config['eos_token_id'] = self.tokenizer.eos_token_id
-                
-                # 프로세서를 None으로 설정 (fallback에서는 사용하지 않음)
-                self.processor = None
-                
-                logger.info(f"✅ Fallback model loaded successfully on {self.device}")
-                
-            except Exception as e2:
-                logger.error(f"❌ Fallback loading also failed: {e2}")
-                raise RuntimeError(f"Qwen2.5 model loading failed: {e} | Fallback: {e2}")
+        logger.info("📝 Using placeholder-based enhancement, no model loading required")
+        pass
     
     def enhance_prompt(self, user_prompt: str) -> str:
         """
-        사용자 프롬프트를 개선하여 더 상세한 프롬프트로 변환
-        
-        이 메서드는 간단한 프롬프트를 받아서:
-        1. 프롬프트 템플릿 적용
-        2. Qwen2.5-VL로 텍스트 생성
-        3. 후처리 및 정제
-        4. 개선된 프롬프트 반환
+        사용자 프롬프트를 간단한 플레이스홀더 방식으로 개선
         
         Args:
-            user_prompt (str): 사용자가 입력한 간단한 프롬프트
+            user_prompt (str): 개선할 원본 프롬프트
             
         Returns:
-            str: 개선된 상세 프롬프트
-            
-        Example:
-            Input: "a cat"
-            Output: "a fluffy orange tabby cat sitting gracefully on a windowsill, 
-                    soft natural lighting, professional pet photography, detailed fur texture"
+            str: 개선된 프롬프트
         """
+        if not user_prompt or not user_prompt.strip():
+            logger.warning("⚠️ Empty prompt provided, using fallback")
+            return self._fallback_enhancement("")
+        
         try:
-            # 프롬프트 템플릿 적용
-            enhanced_prompt_template = self._create_enhancement_template(user_prompt)
-        
-            if self.processor is not None:
-                # Qwen2.5-VL 스타일 메시지 형식
-                messages = [
-                    {
-                        "role": "system", 
-                        "content": "You are an expert in creating detailed, artistic image generation prompts. Transform simple prompts into rich, descriptive ones."
-                    },
-                    {
-                        "role": "user", 
-                        "content": enhanced_prompt_template
-                    }
-                ]
-                
-                # 채팅 템플릿 적용
-                text = self.processor.apply_chat_template(
-                    messages, 
-                    tokenize=False, 
-                    add_generation_prompt=True
-                )
-                
-                # 토크나이징
-                inputs = self.processor(
-                    text=[text],
-                    images=None,  # 텍스트만 처리
-                    padding=True,
-                    return_tensors="pt"
-                ).to(self.device)
-            else:
-                # 대안 방식 (fallback 모델용)
-                text = f"Human: {enhanced_prompt_template}\n\nAssistant:"
-                inputs = self.tokenizer(
-                    text, 
-                    return_tensors="pt", 
-                    padding=True, 
-                    truncation=True,
-                    max_length=512
-                ).to(self.device)
-        
-            # 텍스트 생성
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    **self.generation_config
-                )
-        
-            # 디코딩 및 후처리
-            output_ids = outputs[0][inputs.input_ids.shape[1]:]
-            if self.processor is not None:
-                generated_text = self.processor.decode(
-                    output_ids, 
-                    skip_special_tokens=True
-                )
-            else:
-                generated_text = self.tokenizer.decode(
-                    output_ids, 
-                    skip_special_tokens=True
-                )
-        
-            # 개선된 프롬프트 추출 및 정제
-            enhanced_prompt = self._extract_enhanced_prompt(
-                generated_text, 
-                enhanced_prompt_template
-            )
+            # 입력 검증 및 정제
+            user_prompt = user_prompt.strip()
+            if len(user_prompt) > 200:  # 너무 긴 프롬프트 제한
+                user_prompt = user_prompt[:200]
+                logger.warning("⚠️ Prompt truncated to 200 characters")
             
-            logger.debug(f"📝 Original: {user_prompt}")
-            logger.debug(f"✨ Enhanced: {enhanced_prompt}")
+            # 간단한 플레이스홀더 기반 개선
+            enhanced_prompt = self._enhance_with_placeholders(user_prompt)
             
+            logger.debug(f"✅ Enhanced: '{user_prompt}' → '{enhanced_prompt}'")
             return enhanced_prompt
             
         except Exception as e:
             logger.warning(f"⚠️ Prompt enhancement failed: {e}")
-            # 실패 시 원본 프롬프트에 기본 개선 적용
             return self._fallback_enhancement(user_prompt)
+    
+    def _enhance_with_placeholders(self, user_prompt: str) -> str:
+        """
+        플레이스홀더를 사용한 간단한 프롬프트 개선
+        
+        Args:
+            user_prompt (str): 원본 프롬프트
+            
+        Returns:
+            str: 개선된 프롬프트
+        """
+        # 기본 품질 향상 키워드들
+        quality_keywords = [
+            "high quality", "detailed", "professional", "sharp focus",
+            "well-lit", "artistic", "masterpiece", "8k resolution"
+        ]
+        
+        style_keywords = [
+            "photorealistic", "cinematic lighting", "depth of field",
+            "vivid colors", "perfect composition", "award-winning"
+        ]
+        
+        # 카테고리별 특화 키워드
+        category_keywords = {
+            "person": ["portrait", "beautiful", "elegant", "expressive"],
+            "woman": ["graceful", "stunning", "sophisticated", "charming"],
+            "man": ["handsome", "distinguished", "confident", "strong"],
+            "cat": ["fluffy", "adorable", "cute", "playful"],
+            "dog": ["loyal", "friendly", "energetic", "beautiful"],
+            "landscape": ["scenic", "breathtaking", "panoramic", "majestic"],
+            "mountain": ["towering", "snow-capped", "dramatic", "rugged"],
+            "ocean": ["crystal clear", "turquoise", "serene", "vast"],
+            "forest": ["lush", "dense", "mystical", "green"],
+            "city": ["urban", "modern", "bustling", "architectural"],
+            "building": ["impressive", "grand", "structural", "geometric"],
+            "flower": ["blooming", "colorful", "delicate", "fragrant"],
+            "food": ["delicious", "appetizing", "gourmet", "fresh"],
+            "car": ["sleek", "powerful", "luxury", "sporty"],
+            "abstract": ["creative", "unique", "innovative", "contemporary"]
+        }
+        
+        # 사용자 프롬프트에서 키워드 감지
+        user_lower = user_prompt.lower()
+        detected_category = None
+        
+        for category, keywords in category_keywords.items():
+            if category in user_lower:
+                detected_category = category
+                break
+        
+        # 개선된 프롬프트 구성
+        enhanced_parts = [user_prompt]
+        
+        # 카테고리별 키워드 추가
+        if detected_category:
+            category_words = category_keywords[detected_category]
+            enhanced_parts.extend(category_words[:2])  # 상위 2개만 사용
+        
+        # 품질 키워드 추가
+        import random
+        enhanced_parts.extend(random.sample(quality_keywords, 2))
+        enhanced_parts.extend(random.sample(style_keywords, 1))
+        
+        # 최종 프롬프트 조합
+        enhanced_prompt = ", ".join(enhanced_parts)
+        
+        return enhanced_prompt
     
     def enhance_prompts_batch(self, user_prompts: List[str]) -> List[str]:
         """

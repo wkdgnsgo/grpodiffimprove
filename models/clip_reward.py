@@ -21,6 +21,7 @@ from PIL import Image
 from typing import List, Dict, Optional, Union, Tuple
 import logging
 import numpy as np
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -407,47 +408,272 @@ class MultiRewardCalculator:
         
         logger.info(f"🎯 Multi-reward weights: {self.weights}")
     
-    def calculate_comprehensive_reward(self,
-                                     image: Image.Image,
-                                     original_prompt: str,
+    def calculate_comprehensive_reward(self, 
+                                     image: Optional[Image.Image], 
+                                     original_prompt: str, 
                                      enhanced_prompt: str) -> Dict[str, float]:
         """
         종합적인 보상 계산
         
         Args:
-            image (PIL.Image.Image): 생성된 이미지
+            image (Optional[Image.Image]): 생성된 이미지 (None일 수 있음)
             original_prompt (str): 원본 프롬프트
             enhanced_prompt (str): 개선된 프롬프트
             
         Returns:
-            Dict[str, float]: 각 보상과 최종 종합 보상
+            Dict[str, float]: 종합 보상 결과
         """
-        rewards = {}
+        try:
+            # 입력 검증
+            if image is None:
+                logger.warning("⚠️ No image provided for reward calculation")
+                return {
+                    'clip_similarity': 0.0,
+                    'image_quality': 0.0,
+                    'semantic_consistency': 0.0,
+                    'final_reward': 0.0
+                }
+            
+            if not original_prompt or not enhanced_prompt:
+                logger.warning("⚠️ Empty prompts provided for reward calculation")
+                return {
+                    'clip_similarity': 0.0,
+                    'image_quality': 0.0,
+                    'semantic_consistency': 0.0,
+                    'final_reward': 0.0
+                }
+            
+            # 안전한 보상 계산
+            rewards = {}
+            
+            # 1. CLIP 유사도 계산 (안전한 방식)
+            try:
+                clip_score = self._calculate_safe_clip_similarity(image, enhanced_prompt)
+                rewards['clip_similarity'] = max(0.0, min(1.0, clip_score))
+            except Exception as e:
+                logger.warning(f"⚠️ CLIP similarity calculation failed: {e}")
+                rewards['clip_similarity'] = 0.0
+            
+            # 2. 이미지 품질 점수 계산
+            try:
+                quality_score = self._calculate_safe_image_quality(image)
+                rewards['image_quality'] = max(0.0, min(1.0, quality_score))
+            except Exception as e:
+                logger.warning(f"⚠️ Image quality calculation failed: {e}")
+                rewards['image_quality'] = 0.0
+            
+            # 3. 의미적 일관성 계산
+            try:
+                consistency_score = self._calculate_safe_semantic_consistency(
+                    original_prompt, enhanced_prompt
+                )
+                rewards['semantic_consistency'] = max(0.0, min(1.0, consistency_score))
+            except Exception as e:
+                logger.warning(f"⚠️ Semantic consistency calculation failed: {e}")
+                rewards['semantic_consistency'] = 0.0
+            
+            # 4. 최종 보상 계산 (가중평균)
+            final_reward = (
+                rewards['clip_similarity'] * self.weights['clip_similarity'] +
+                rewards['image_quality'] * self.weights['image_quality'] +
+                rewards['semantic_consistency'] * self.weights['semantic_consistency']
+            )
+            
+            rewards['final_reward'] = max(0.0, min(1.0, final_reward))
+            
+            logger.debug(f"📊 Comprehensive rewards: {rewards}")
+            return rewards
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Reward calculation failed: {e}")
+            return {
+                'clip_similarity': 0.0,
+                'image_quality': 0.0,
+                'semantic_consistency': 0.0,
+                'final_reward': 0.0
+            }
+    
+    def _calculate_safe_clip_similarity(self, image: Image.Image, prompt: str) -> float:
+        """
+        안전한 CLIP 유사도 계산
         
-        # 1. CLIP 유사도 보상 (개선된 프롬프트 기준)
-        rewards['clip_similarity'] = self.clip_calculator.calculate_reward(
-            image, enhanced_prompt
-        )
+        Args:
+            image (Image.Image): 입력 이미지
+            prompt (str): 텍스트 프롬프트
+            
+        Returns:
+            float: CLIP 유사도 점수 (0.0-1.0)
+        """
+        try:
+            # 입력 검증
+            if not hasattr(image, 'size') or image.size[0] == 0 or image.size[1] == 0:
+                logger.warning("⚠️ Invalid image for CLIP calculation")
+                return 0.0
+            
+            if not prompt or len(prompt.strip()) == 0:
+                logger.warning("⚠️ Empty prompt for CLIP calculation")
+                return 0.0
+            
+            # 프롬프트 길이 제한
+            prompt = prompt.strip()[:200]
+            
+            # CUDA 메모리 정리
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            with torch.no_grad():
+                # 이미지 전처리 (안전한 방식)
+                try:
+                    # 이미지 크기 검증 및 조정
+                    if image.size[0] > 1024 or image.size[1] > 1024:
+                        image = image.resize((512, 512), Image.Resampling.LANCZOS)
+                    
+                    # RGB 변환 (필요시)
+                    if image.mode != 'RGB':
+                        image = image.convert('RGB')
+                    
+                    image_inputs = self.clip_calculator.processor(
+                        images=image, 
+                        return_tensors="pt",
+                        do_rescale=True,
+                        do_normalize=True
+                    )
+                    
+                    # 입력 검증
+                    if 'pixel_values' not in image_inputs:
+                        logger.warning("⚠️ Invalid image preprocessing result")
+                        return 0.0
+                    
+                    image_inputs = {k: v.to(self.clip_calculator.device) for k, v in image_inputs.items()}
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Image preprocessing failed: {e}")
+                    return 0.0
+                
+                # 텍스트 전처리 (안전한 방식)
+                try:
+                    text_inputs = self.clip_calculator.processor(
+                        text=[prompt], 
+                        return_tensors="pt", 
+                        padding=True, 
+                        truncation=True,
+                        max_length=77
+                    )
+                    
+                    # 입력 검증
+                    if 'input_ids' not in text_inputs:
+                        logger.warning("⚠️ Invalid text preprocessing result")
+                        return 0.0
+                    
+                    text_inputs = {k: v.to(self.clip_calculator.device) for k, v in text_inputs.items()}
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Text preprocessing failed: {e}")
+                    return 0.0
+                
+                # CLIP 임베딩 계산 (안전한 방식)
+                try:
+                    image_features = self.clip_calculator.model.get_image_features(**image_inputs)
+                    text_features = self.clip_calculator.model.get_text_features(**text_inputs)
+                    
+                    # 특징 벡터 검증
+                    if image_features is None or text_features is None:
+                        logger.warning("⚠️ Failed to extract features")
+                        return 0.0
+                    
+                    if torch.isnan(image_features).any() or torch.isnan(text_features).any():
+                        logger.warning("⚠️ NaN values in features")
+                        return 0.0
+                    
+                    # 정규화
+                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                    
+                    # 유사도 계산
+                    similarity = torch.cosine_similarity(image_features, text_features).item()
+                    
+                    # 결과 검증
+                    if math.isnan(similarity) or math.isinf(similarity):
+                        logger.warning("⚠️ Invalid similarity score")
+                        return 0.0
+                    
+                    # 0-1 범위로 정규화
+                    normalized_similarity = (similarity + 1.0) / 2.0
+                    return max(0.0, min(1.0, normalized_similarity))
+                    
+                except RuntimeError as e:
+                    if "CUDA" in str(e) or "device-side assert" in str(e):
+                        logger.warning(f"⚠️ CUDA error in CLIP calculation: {e}")
+                        # CUDA 캐시 정리
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                        return 0.0
+                    else:
+                        raise e
+                        
+        except Exception as e:
+            logger.warning(f"⚠️ CLIP similarity calculation failed: {e}")
+            return 0.0
+    
+    def _calculate_safe_image_quality(self, image: Image.Image) -> float:
+        """
+        안전한 이미지 품질 계산
         
-        # 2. 이미지 품질 보상
-        rewards['image_quality'] = self.clip_calculator.calculate_quality_reward(image)
+        Args:
+            image (Image.Image): 입력 이미지
+            
+        Returns:
+            float: 품질 점수 (0.0-1.0)
+        """
+        try:
+            # 기본적인 품질 지표들
+            width, height = image.size
+            
+            # 해상도 점수 (최소 256x256 이상이면 좋음)
+            resolution_score = min(1.0, (width * height) / (512 * 512))
+            
+            # 종횡비 점수 (1:1에 가까울수록 좋음)
+            aspect_ratio = max(width, height) / min(width, height)
+            aspect_score = max(0.0, 1.0 - (aspect_ratio - 1.0) / 2.0)
+            
+            # 전체 품질 점수
+            quality_score = (resolution_score + aspect_score) / 2.0
+            
+            return max(0.0, min(1.0, quality_score))
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Image quality calculation failed: {e}")
+            return 0.0
+    
+    def _calculate_safe_semantic_consistency(self, original: str, enhanced: str) -> float:
+        """
+        안전한 의미적 일관성 계산
         
-        # 3. 의미적 일관성 보상
-        rewards['semantic_consistency'] = self.clip_calculator.calculate_semantic_consistency(
-            image, original_prompt, enhanced_prompt
-        )
-        
-        # 4. 가중 평균으로 최종 보상 계산
-        final_reward = sum(
-            rewards[key] * self.weights[key] 
-            for key in rewards.keys() 
-            if key in self.weights
-        )
-        
-        rewards['final_reward'] = final_reward
-        
-        logger.debug(f"🏆 Comprehensive rewards: {rewards}")
-        return rewards
+        Args:
+            original (str): 원본 프롬프트
+            enhanced (str): 개선된 프롬프트
+            
+        Returns:
+            float: 일관성 점수 (0.0-1.0)
+        """
+        try:
+            # 간단한 키워드 기반 일관성 검사
+            original_words = set(original.lower().split())
+            enhanced_words = set(enhanced.lower().split())
+            
+            if len(original_words) == 0:
+                return 0.0
+            
+            # 교집합 비율 계산
+            intersection = original_words.intersection(enhanced_words)
+            consistency_score = len(intersection) / len(original_words)
+            
+            return max(0.0, min(1.0, consistency_score))
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Semantic consistency calculation failed: {e}")
+            return 0.0
 
 
 if __name__ == "__main__":

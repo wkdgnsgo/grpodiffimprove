@@ -230,67 +230,87 @@ class SD3Generator:
                     logger.error(f"❌ All loading methods failed: {e} | {e2} | {e3}")
                     raise RuntimeError(f"SD pipeline loading failed completely: {e3}")
     
-    def generate_image(self, 
-                      prompt: str, 
-                      negative_prompt: Optional[str] = None,
-                      seed: Optional[int] = None) -> Image.Image:
+    def generate_image(self, prompt: str, **kwargs) -> Optional[Image.Image]:
         """
-        단일 프롬프트로부터 이미지 생성
-        
-        이 메서드는 텍스트 프롬프트를 받아서:
-        1. 프롬프트 전처리
-        2. SD3로 이미지 생성
-        3. 후처리 및 품질 확인
-        4. PIL Image 반환
+        텍스트 프롬프트로부터 이미지 생성
         
         Args:
             prompt (str): 이미지 생성용 텍스트 프롬프트
-            negative_prompt (str, optional): 원하지 않는 요소 지정
-            seed (int, optional): 재현 가능한 결과를 위한 시드
+            **kwargs: 추가 생성 파라미터
             
         Returns:
-            PIL.Image.Image: 생성된 이미지
-            
-        Example:
-            image = generator.generate_image(
-                "a fluffy orange cat sitting on a windowsill, professional photography"
-            )
+            Optional[Image.Image]: 생성된 이미지 (실패 시 None)
         """
+        if not prompt or not prompt.strip():
+            logger.warning("⚠️ Empty prompt provided for image generation")
+            return self._create_fallback_image()
+        
         try:
-            # 시드 설정 (재현 가능한 결과)
-            generator = None
-            if seed is not None:
-                generator = torch.Generator(device=self.device).manual_seed(seed)
-                self.generation_config['generator'] = generator
+            # 입력 검증 및 정제
+            prompt = prompt.strip()
+            if len(prompt) > 500:  # 프롬프트 길이 제한
+                prompt = prompt[:500]
+                logger.warning("⚠️ Prompt truncated to 500 characters")
             
-            # 네거티브 프롬프트 기본값 설정
-            if negative_prompt is None:
-                negative_prompt = "blurry, low quality, distorted, deformed, ugly, bad anatomy"
+            # 안전한 생성 파라미터 설정
+            safe_params = {
+                'height': kwargs.get('height', self.height),
+                'width': kwargs.get('width', self.width),
+                'num_inference_steps': min(50, max(10, kwargs.get('num_inference_steps', self.num_inference_steps))),
+                'guidance_scale': max(1.0, min(20.0, kwargs.get('guidance_scale', self.guidance_scale))),
+                'negative_prompt': kwargs.get('negative_prompt', "blurry, low quality, distorted"),
+                'generator': None,  # 안정성을 위해 시드 고정 해제
+                'output_type': "pil",
+                'return_dict': True
+            }
             
-            logger.debug(f"🎨 Generating image for prompt: '{prompt[:50]}...'")
+            logger.debug(f"🎨 Generating image with prompt: '{prompt[:50]}...'")
+            logger.debug(f"📊 Generation params: {safe_params}")
             
-            # 이미지 생성
-            with torch.no_grad():
-                result = self.pipeline(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    **self.generation_config
-                )
+            # CUDA 메모리 정리
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
-            # 생성된 이미지 추출
-            generated_image = result.images[0]
-            
-            # 이미지 품질 검증
-            if self._validate_image(generated_image):
-                logger.debug("✅ Image generated successfully")
-                return generated_image
-            else:
-                logger.warning("⚠️ Generated image quality check failed")
-                return generated_image  # 실패해도 이미지는 반환
-                
+            # 이미지 생성 (안전한 방식으로)
+            try:
+                with torch.no_grad():
+                    # 메모리 효율적 생성
+                    if hasattr(self.pipeline, 'enable_model_cpu_offload'):
+                        self.pipeline.enable_model_cpu_offload()
+                    
+                    result = self.pipeline(
+                        prompt=prompt,
+                        **safe_params
+                    )
+                    
+                    # 결과 검증
+                    if result is None or not hasattr(result, 'images') or len(result.images) == 0:
+                        logger.warning("⚠️ Empty generation result, using fallback")
+                        return self._create_fallback_image()
+                    
+                    image = result.images[0]
+                    
+                    # 이미지 검증
+                    if image is None or not hasattr(image, 'size'):
+                        logger.warning("⚠️ Invalid image generated, using fallback")
+                        return self._create_fallback_image()
+                    
+                    logger.debug(f"✅ Image generated: {image.size}")
+                    return image
+                    
+            except RuntimeError as e:
+                if "CUDA" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e):
+                    logger.error(f"❌ CUDA error during image generation: {e}")
+                    # CUDA 캐시 정리
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                    return self._create_fallback_image()
+                else:
+                    raise e
+                    
         except Exception as e:
             logger.error(f"❌ Image generation failed: {e}")
-            # 실패 시 빈 이미지 반환
             return self._create_fallback_image()
     
     def generate_images_batch(self, 
@@ -362,20 +382,20 @@ class SD3Generator:
     
     def _create_fallback_image(self) -> Image.Image:
         """
-        이미지 생성 실패 시 사용할 기본 이미지 생성
+        생성 실패 시 사용할 대체 이미지 생성
         
         Returns:
-            PIL.Image.Image: 기본 이미지
+            Image.Image: 대체 이미지
         """
-        # 단색 이미지 생성 (연구용)
-        fallback_image = Image.new(
-            'RGB', 
-            (self.width, self.height), 
-            color=(128, 128, 128)  # 회색
-        )
-        
-        logger.info("🔄 Using fallback image")
-        return fallback_image
+        try:
+            # 단색 이미지 생성 (RGB)
+            fallback_image = Image.new('RGB', (self.width, self.height), color=(128, 128, 128))
+            logger.info("🔄 Using fallback image")
+            return fallback_image
+        except Exception as e:
+            logger.error(f"❌ Failed to create fallback image: {e}")
+            # 최소한의 이미지라도 생성
+            return Image.new('RGB', (512, 512), color=(64, 64, 64))
     
     def save_image(self, 
                    image: Image.Image, 

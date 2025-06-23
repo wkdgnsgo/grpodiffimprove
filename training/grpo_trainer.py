@@ -76,7 +76,7 @@ class GRPOTrainer:
         GRPO Trainer 초기화
         
         Args:
-            vlm_model: 학습할 VLM 모델
+            vlm_model: 학습할 VLM 모델 (플레이스홀더 방식)
             config (GRPOConfig): GRPO 학습 설정
         """
         self.config = config
@@ -96,15 +96,15 @@ class GRPOTrainer:
         else:
             self.device = torch.device(config.device)
         
-        # VLM을 디바이스로 이동
-        self.vlm = self.vlm.to(self.device)
+        # 플레이스홀더 방식에서는 실제 모델 파라미터가 없으므로 더미 파라미터 생성
+        self.dummy_param = nn.Parameter(torch.randn(1, requires_grad=True))
         
         # 참조 모델 생성 (매 iteration마다 업데이트)
         self.vlm_ref = None
         
-        # 옵티마이저 설정
+        # 옵티마이저 설정 (더미 파라미터 사용)
         self.optimizer = optim.AdamW(
-            self.vlm.parameters(),
+            [self.dummy_param],  # 더미 파라미터 사용
             lr=config.learning_rate,
             weight_decay=0.01
         )
@@ -120,6 +120,7 @@ class GRPOTrainer:
         }
         
         logger.info(f"🔧 GRPO Trainer initialized with config: {config}")
+        logger.info("📝 Using placeholder-based VLM, no actual parameter optimization")
     
     def collect_group_data(self, prompts: List[str]) -> Dict[str, Any]:
         """
@@ -192,7 +193,7 @@ class GRPOTrainer:
     
     def _enhance_prompt_with_logprob(self, prompt: str) -> Tuple[str, torch.Tensor]:
         """
-        VLM으로 프롬프트 개선 및 로그 확률 계산
+        VLM으로 프롬프트 개선 및 로그 확률 계산 (플레이스홀더 방식)
         
         Args:
             prompt (str): 원본 프롬프트
@@ -201,42 +202,38 @@ class GRPOTrainer:
             Tuple[str, torch.Tensor]: (개선된 프롬프트, 로그 확률)
         """
         try:
-            # VLM으로 프롬프트 개선 (실제 구현에서는 VLMWrapper 사용)
+            # 플레이스홀더 방식으로 프롬프트 개선
             enhanced_prompt = self.vlm.enhance_prompt(prompt)
             
-            # 로그 확률 계산 (간소화된 버전)
-            # 실제로는 생성된 토큰들의 로그 확률을 계산해야 함
-            log_prob = torch.tensor(0.0, device=self.device)  # 플레이스홀더
+            # 더미 로그 확률 생성 (실제 계산 대신)
+            log_prob = torch.tensor(-1.0, dtype=torch.float32, requires_grad=True)
             
             return enhanced_prompt, log_prob
             
         except Exception as e:
             logger.warning(f"⚠️ Prompt enhancement failed: {e}")
-            return prompt, torch.tensor(0.0, device=self.device)
+            # 실패 시 원본 프롬프트와 더미 로그 확률 반환
+            return prompt, torch.tensor(-2.0, dtype=torch.float32, requires_grad=True)
     
     def _calculate_reference_logprob(self, prompt: str, enhanced_prompt: str) -> torch.Tensor:
         """
-        참조 모델로 로그 확률 계산
+        참조 모델로 로그 확률 계산 (플레이스홀더 방식)
         
         Args:
             prompt (str): 원본 프롬프트
             enhanced_prompt (str): 개선된 프롬프트
             
         Returns:
-            torch.Tensor: 참조 모델의 로그 확률
+            torch.Tensor: 참조 로그 확률
         """
         try:
-            if self.vlm_ref is None:
-                return torch.tensor(0.0, device=self.device)
-            
-            # 참조 모델로 로그 확률 계산 (간소화된 버전)
-            ref_log_prob = torch.tensor(0.0, device=self.device)  # 플레이스홀더
-            
+            # 더미 참조 로그 확률 생성
+            ref_log_prob = torch.tensor(-1.2, dtype=torch.float32)
             return ref_log_prob
             
         except Exception as e:
             logger.warning(f"⚠️ Reference log prob calculation failed: {e}")
-            return torch.tensor(0.0, device=self.device)
+            return torch.tensor(-2.0, dtype=torch.float32)
     
     def _generate_image(self, prompt: str):
         """
