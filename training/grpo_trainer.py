@@ -212,13 +212,26 @@ class GRPOTrainer:
                     next_token = policy_dist.sample()
                     log_prob = policy_dist.log_prob(next_token)
                     
+                    # 디버깅: 차원 확인
+                    logger.debug(f"current_sequence shape: {current_sequence.shape}")
+                    logger.debug(f"next_token shape: {next_token.shape}")
+                    
                     # 데이터 저장
                     episode_states.append(current_state.squeeze())
                     episode_actions.append(next_token)
                     episode_log_probs.append(log_prob)
                     
-                    # 시퀀스 업데이트
-                    current_sequence = torch.cat([current_sequence, next_token.unsqueeze(0).unsqueeze(0)], dim=1)
+                    # 시퀀스 업데이트 (차원 맞춤)
+                    # current_sequence: [1, seq_len], next_token을 [1, 1]로 만들어서 concat
+                    if next_token.dim() == 0:  # 스칼라인 경우
+                        next_token_expanded = next_token.unsqueeze(0).unsqueeze(0)  # [1, 1]
+                    elif next_token.dim() == 1:  # [batch_size]인 경우
+                        next_token_expanded = next_token.unsqueeze(1)  # [batch_size, 1]
+                    else:
+                        next_token_expanded = next_token
+                    
+                    logger.debug(f"next_token_expanded shape: {next_token_expanded.shape}")
+                    current_sequence = torch.cat([current_sequence, next_token_expanded], dim=1)
                     
                     # EOS 토큰이면 중단
                     if next_token.item() == self.tokenizer.eos_token_id:
