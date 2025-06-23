@@ -83,6 +83,19 @@ class QwenWrapper:
         try:
             logger.info(f"📥 Loading QWEN VL model: {self.model_name}")
             
+            # Distributed training 환경 변수 설정 (자동 distributed 방지)
+            import os
+            if 'RANK' not in os.environ:
+                os.environ['RANK'] = '0'
+            if 'WORLD_SIZE' not in os.environ:
+                os.environ['WORLD_SIZE'] = '1'
+            if 'LOCAL_RANK' not in os.environ:
+                os.environ['LOCAL_RANK'] = '0'
+            if 'MASTER_ADDR' not in os.environ:
+                os.environ['MASTER_ADDR'] = 'localhost'
+            if 'MASTER_PORT' not in os.environ:
+                os.environ['MASTER_PORT'] = '12355'
+            
             # VL 모델을 위한 임포트
             from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
             
@@ -93,12 +106,22 @@ class QwenWrapper:
             )
             self.tokenizer = self.processor.tokenizer
             
-            # VL 모델 로드
+            # VL 모델 로드 (distributed 모드 방지)
+            model_kwargs = {
+                'torch_dtype': torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32,
+                'trust_remote_code': True,
+                'low_cpu_mem_usage': True
+            }
+            
+            # device_map을 특정 GPU로 고정 (auto 사용 안함)
+            if self.device.type == "cuda":
+                model_kwargs['device_map'] = {
+                    '': self.device  # 전체 모델을 지정된 GPU로
+                }
+            
             self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.model_name,
-                torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32,
-                device_map="auto" if self.device.type == "cuda" else None,
-                trust_remote_code=True
+                **model_kwargs
             )
             
             # CPU로 이동 (필요한 경우)

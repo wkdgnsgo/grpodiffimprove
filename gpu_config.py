@@ -44,6 +44,16 @@ class MultiGPUConfig:
             'PYTORCH_CUDA_ALLOC_CONF': 'max_split_size_mb:512',  # 메모리 관리 최적화
             'NCCL_DEBUG': 'INFO',  # Multi-GPU 통신 디버깅
             'NCCL_IB_DISABLE': '1',  # InfiniBand 비활성화 (필요시)
+            # Distributed training 환경 변수 (단일 노드)
+            'RANK': '0',
+            'WORLD_SIZE': '1',
+            'LOCAL_RANK': '0',
+            'MASTER_ADDR': 'localhost',
+            'MASTER_PORT': '12355',
+            # Hugging Face 설정
+            'HF_HUB_DISABLE_PROGRESS_BARS': '1',
+            'TRANSFORMERS_NO_ADVISORY_WARNINGS': '1',
+            'TOKENIZERS_PARALLELISM': 'false'
         }
         
         # 환경 변수 적용

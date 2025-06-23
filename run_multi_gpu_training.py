@@ -30,7 +30,17 @@ def setup_gpu_environment():
         'TORCH_CUDA_ARCH_LIST': '8.0;8.6;8.9;9.0',
         'PYTORCH_CUDA_ALLOC_CONF': 'max_split_size_mb:512',
         'NCCL_DEBUG': 'INFO',
-        'NCCL_IB_DISABLE': '1'
+        'NCCL_IB_DISABLE': '1',
+        # Distributed training 환경 변수 (단일 노드)
+        'RANK': '0',
+        'WORLD_SIZE': '1',
+        'LOCAL_RANK': '0',
+        'MASTER_ADDR': 'localhost',
+        'MASTER_PORT': '12355',
+        # Hugging Face distributed 비활성화
+        'HF_HUB_DISABLE_PROGRESS_BARS': '1',
+        'TRANSFORMERS_NO_ADVISORY_WARNINGS': '1',
+        'TOKENIZERS_PARALLELISM': 'false'
     }
     
     # 환경 변수 적용
