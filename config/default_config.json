@@ -67,7 +67,9 @@
     "output_dir": "vlm_grpo_results",
     "save_images": true,
     "save_enhanced_prompts": true,
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "save_frequency": 1,
+    "max_images_per_validation": 10
   },
 
   "wandb_settings": {

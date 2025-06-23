@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-VLM GRPO Training Script
-========================
+VLM GRPO Training System Main Runner
+===================================
 
-VLM GRPO 시스템을 실행하는 간단한 스크립트입니다.
+VLM GRPO 학습 시스템의 메인 실행 스크립트입니다.
 
 사용법:
     python run_training.py                    # 기본 설정으로 실행
@@ -17,119 +17,65 @@ Date: 2025-01-22
 import argparse
 import sys
 import os
+import json
 from pathlib import Path
+import logging
 
 # 현재 디렉토리를 Python path에 추가
 current_dir = Path(__file__).parent
 sys.path.insert(0, str(current_dir))
 
-def main():
-    """메인 실행 함수"""
-    parser = argparse.ArgumentParser(description="VLM GRPO Training System")
-    
-    parser.add_argument(
-        "--config", 
-        type=str, 
-        default=None,
-        help="설정 파일 경로 (기본값: config/default_config.json)"
-    )
-    
-    parser.add_argument(
-        "--test", 
-        action="store_true",
-        help="테스트 모드로 실행 (짧은 학습)"
-    )
-    
-    parser.add_argument(
-        "--debug", 
-        action="store_true",
-        help="디버그 모드로 실행 (상세 로그)"
-    )
-    
-    parser.add_argument(
-        "--no-wandb", 
-        action="store_true",
-        help="Wandb 없이 실행"
-    )
-    
-    args = parser.parse_args()
-    
-    # 설정 파일 경로 설정
-    if args.config is None:
-        args.config = current_dir / "config" / "default_config.json"
-    
-    print("🚀 VLM GRPO Training System")
-    print("=" * 50)
-    print(f"📁 작업 디렉토리: {current_dir}")
-    print(f"⚙️ 설정 파일: {args.config}")
-    print(f"🧪 테스트 모드: {args.test}")
-    print(f"🐛 디버그 모드: {args.debug}")
-    print(f"📈 Wandb 사용: {not args.no_wandb}")
-    print("=" * 50)
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def load_config(config_path: str = None) -> dict:
+    """설정 파일 로드"""
+    if config_path is None:
+        config_path = current_dir / "config" / "default_config.json"
     
     try:
-        # 메인 트레이너 임포트 및 실행
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        logger.info(f"⚙️ Config loaded from: {config_path}")
+        return config
+    except Exception as e:
+        logger.error(f"❌ Failed to load config: {e}")
+        raise
+
+def main():
+    """메인 실행 함수"""
+    logger.info("🚀 Starting VLM GRPO Training System")
+    
+    try:
+        # 1. 설정 로드
+        config = load_config()
+        
+        # 2. 출력 디렉토리 생성
+        output_dir = config.get("output_settings", {}).get("output_dir", "vlm_grpo_results")
+        os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"📁 Output directory: {output_dir}")
+        
+        # 3. 메인 트레이너 초기화
         from integration.main_trainer import VLMGRPOSystem
+        trainer = VLMGRPOSystem()
         
-        # 시스템 초기화
-        system = VLMGRPOSystem(config_path=str(args.config))
+        # 4. 컴포넌트 초기화
+        trainer.initialize_components()
         
-        # 테스트 모드 설정 적용
-        if args.test:
-            print("🧪 테스트 모드: 빠른 학습 설정 적용")
-            system.config.update({
-                "num_iterations": 5,
-                "group_size": 2,
-                "validation_interval": 2,
-                "checkpoint_interval": 3
-            })
+        # 5. 학습 실행
+        trainer.run_training()
         
-        # Wandb 설정 적용
-        if args.no_wandb:
-            print("📈 Wandb 비활성화")
-            system.config["use_wandb"] = False
-        
-        # 디버그 모드 설정
-        if args.debug:
-            print("🐛 디버그 모드: 상세 로그 활성화")
-            import logging
-            logging.getLogger().setLevel(logging.DEBUG)
-        
-        # 컴포넌트 초기화
-        print("\n🔧 시스템 컴포넌트 초기화 중...")
-        system.initialize_components()
-        
-        # 학습 실행
-        print("\n🚀 학습 시작!")
-        system.run_training()
-        
-        print("\n✅ 학습이 성공적으로 완료되었습니다!")
-        print(f"📁 결과 폴더: {system.config['output_dir']}")
+        logger.info("✅ Training completed successfully!")
         
     except KeyboardInterrupt:
-        print("\n⚠️ 사용자에 의해 학습이 중단되었습니다.")
-        sys.exit(1)
-        
-    except ImportError as e:
-        print(f"\n❌ 모듈 임포트 오류: {e}")
-        print("\n💡 해결 방법:")
-        print("1. 필요한 패키지들이 설치되어 있는지 확인하세요:")
-        print("   pip install torch transformers diffusers pillow numpy")
-        print("2. 모든 모듈 파일이 올바른 위치에 있는지 확인하세요.")
-        sys.exit(1)
-        
+        logger.info("⏹️ Training interrupted by user")
     except Exception as e:
-        print(f"\n❌ 학습 중 오류 발생: {e}")
-        print("\n💡 문제 해결:")
-        print("1. 설정 파일이 올바른지 확인하세요.")
-        print("2. 데이터 파일이 존재하는지 확인하세요.")
-        print("3. 충분한 메모리와 저장 공간이 있는지 확인하세요.")
-        
-        if args.debug:
-            import traceback
-            traceback.print_exc()
-        
-        sys.exit(1)
+        logger.error(f"❌ Training failed: {e}")
+        raise
 
 
 def create_sample_data():

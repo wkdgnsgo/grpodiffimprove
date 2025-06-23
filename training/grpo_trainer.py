@@ -282,6 +282,21 @@ class GRPOTrainer:
         Args:
             group_data (Dict[str, Any]): 그룹 데이터 (in-place 수정)
         """
+        # 데이터 완성도 검증
+        expected_length = len(group_data['prompts'])
+        
+        # rewards 길이 검증 및 보정
+        if len(group_data['rewards']) != expected_length:
+            logger.warning(f"⚠️ Rewards length mismatch: {len(group_data['rewards'])} != {expected_length}")
+            while len(group_data['rewards']) < expected_length:
+                group_data['rewards'].append(0.0)
+        
+        # ref_log_probs 길이 검증 및 보정
+        if len(group_data['ref_log_probs']) != expected_length:
+            logger.warning(f"⚠️ ref_log_probs length mismatch: {len(group_data['ref_log_probs'])} != {expected_length}")
+            while len(group_data['ref_log_probs']) < expected_length:
+                group_data['ref_log_probs'].append(torch.tensor(-1.2, dtype=torch.float32))
+        
         rewards = np.array(group_data['rewards'])
         
         # 1. 할인된 리턴 계산 (단순화: 단일 스텝)
@@ -299,6 +314,11 @@ class GRPOTrainer:
         # 4. 텐서로 변환 (디바이스 문제 해결)
         group_data['returns'] = [torch.tensor(float(r), dtype=torch.float32) for r in returns]
         group_data['advantages'] = [torch.tensor(float(a), dtype=torch.float32) for a in advantages]
+        
+        # 5. 최종 길이 검증
+        for key in ['returns', 'advantages']:
+            if len(group_data[key]) != expected_length:
+                logger.error(f"❌ Final length mismatch for {key}: {len(group_data[key])} != {expected_length}")
         
         logger.debug(f"📊 Advantages calculated: mean={np.mean(advantages):.4f}, std={np.std(advantages):.4f}")
     

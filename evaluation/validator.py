@@ -50,20 +50,31 @@ class ValidationEvaluator:
         
         logger.info("✅ Validation Evaluator initialized")
     
-    def evaluate_batch(self, validation_data: List[Dict]) -> Dict[str, Any]:
+    def evaluate_batch(self, validation_data: List[Dict], save_images: bool = True, output_dir: str = "vlm_grpo_results", iteration: int = 0) -> Dict[str, Any]:
         """
         배치 데이터에 대한 종합 평가
         
         Args:
             validation_data (List[Dict]): 검증 데이터
+            save_images (bool): 이미지 저장 여부
+            output_dir (str): 출력 디렉토리
+            iteration (int): 현재 반복 횟수
             
         Returns:
             Dict[str, Any]: 평가 결과
         """
         logger.info(f"🔍 Evaluating batch of {len(validation_data)} items")
         
+        # 이미지 저장 디렉토리 설정
+        if save_images:
+            import os
+            images_dir = os.path.join(output_dir, f"validation_images_iter_{iteration}")
+            os.makedirs(images_dir, exist_ok=True)
+            logger.info(f"📁 Saving validation images to: {images_dir}")
+        
         results = {
             'timestamp': time.time(),
+            'iteration': iteration,
             'total_samples': len(validation_data),
             'success_rate': 0.0,
             'avg_clip_score': 0.0,
@@ -71,7 +82,8 @@ class ValidationEvaluator:
             'processing_time': 0.0,
             'category_results': {},
             'difficulty_results': {},
-            'detailed_results': []
+            'detailed_results': [],
+            'saved_images': [] if save_images else None
         }
         
         start_time = time.time()
@@ -79,16 +91,33 @@ class ValidationEvaluator:
         clip_scores = []
         quality_scores = []
         
-        for item in validation_data:
+        for idx, item in enumerate(validation_data):
             try:
                 # 개별 아이템 평가
-                item_result = self._evaluate_single_item(item)
+                item_result = self._evaluate_single_item(item, save_images, images_dir if save_images else None, idx)
                 results['detailed_results'].append(item_result)
                 
                 if item_result['success']:
                     successful_evaluations += 1
                     clip_scores.append(item_result['clip_score'])
                     quality_scores.append(item_result['quality_score'])
+                
+                # 저장된 이미지 정보 추가
+                if save_images and 'saved_image_path' in item_result:
+                    saved_image_info = {
+                        'prompt': item.get('user_prompt', ''),
+                        'enhanced_prompt': item_result.get('enhanced_prompt', ''),
+                        'image_path': item_result['saved_image_path'],
+                        'clip_score': item_result.get('clip_score', 0.0)
+                    }
+                    
+                    # 추가 경로 정보가 있다면 포함
+                    if 'saved_original_path' in item_result:
+                        saved_image_info['saved_original_path'] = item_result['saved_original_path']
+                    if 'saved_prompts_path' in item_result:
+                        saved_image_info['saved_prompts_path'] = item_result['saved_prompts_path']
+                    
+                    results['saved_images'].append(saved_image_info)
                 
                 # 카테고리별 통계
                 category = item.get('category', 'unknown')
@@ -107,7 +136,7 @@ class ValidationEvaluator:
                     results['difficulty_results'][difficulty]['success'] += 1
                 
             except Exception as e:
-                logger.warning(f"⚠️ Failed to evaluate item: {e}")
+                logger.warning(f"⚠️ Failed to evaluate item {idx}: {e}")
                 results['detailed_results'].append({
                     'prompt': item.get('user_prompt', ''),
                     'success': False,
@@ -132,14 +161,20 @@ class ValidationEvaluator:
         self.evaluation_history.append(results)
         
         logger.info(f"✅ Evaluation completed: {results['success_rate']:.2%} success rate")
+        if save_images:
+            logger.info(f"💾 Saved {len(results.get('saved_images', []))} validation images")
+        
         return results
     
-    def _evaluate_single_item(self, item: Dict) -> Dict[str, Any]:
+    def _evaluate_single_item(self, item: Dict, save_image: bool = False, images_dir: str = None, idx: int = 0) -> Dict[str, Any]:
         """
         단일 아이템 평가
         
         Args:
             item (Dict): 평가할 아이템
+            save_image (bool): 이미지 저장 여부
+            images_dir (str): 이미지 저장 디렉토리
+            idx (int): 아이템 인덱스
             
         Returns:
             Dict[str, Any]: 평가 결과
@@ -171,19 +206,71 @@ class ValidationEvaluator:
             # 2. SD3로 이미지 생성
             image = self.sd_generator.generate_image(enhanced_prompt)
             
-            # 3. CLIP 점수 계산
-            clip_score = self.clip_calculator.calculate_reward(image, enhanced_prompt)
-            result['clip_score'] = clip_score
+            # 3. 이미지 저장 (요청된 경우)
+            if save_image and images_dir and image is not None:
+                try:
+                    import os
+                    from PIL import Image as PILImage
+                    
+                    # 안전한 파일명 생성
+                    safe_prompt = "".join(c for c in user_prompt if c.isalnum() or c in (' ', '-', '_')).rstrip()
+                    safe_prompt = safe_prompt[:50]  # 길이 제한
+                    if not safe_prompt:
+                        safe_prompt = f"prompt_{idx}"
+                    
+                    # 원본 prompt로 이미지 생성 및 저장
+                    image_original = self.sd_generator.generate_image(user_prompt)
+                    if image_original and hasattr(image_original, 'save'):
+                        original_filename = f"{idx:03d}_{safe_prompt}_original.png"
+                        original_path = os.path.join(images_dir, original_filename)
+                        image_original.save(original_path)
+                        result['saved_original_path'] = original_path
+                        logger.debug(f"💾 Saved original image: {original_path}")
+                    
+                    # Enhanced prompt로 이미지 저장
+                    enhanced_filename = f"{idx:03d}_{safe_prompt}_enhanced.png"
+                    enhanced_path = os.path.join(images_dir, enhanced_filename)
+                    
+                    # 이미지 저장
+                    if hasattr(image, 'save'):  # PIL Image인 경우
+                        image.save(enhanced_path)
+                        result['saved_image_path'] = enhanced_path
+                        logger.debug(f"💾 Saved enhanced image: {enhanced_path}")
+                        
+                        # 프롬프트 텍스트 파일도 저장
+                        prompt_filename = f"{idx:03d}_{safe_prompt}_prompts.txt"
+                        prompt_path = os.path.join(images_dir, prompt_filename)
+                        with open(prompt_path, 'w', encoding='utf-8') as f:
+                            f.write(f"Original Prompt:\n{user_prompt}\n\n")
+                            f.write(f"Enhanced Prompt:\n{enhanced_prompt}\n")
+                        result['saved_prompts_path'] = prompt_path
+                        logger.debug(f"💾 Saved prompts: {prompt_path}")
+                        
+                    else:
+                        logger.warning(f"⚠️ Cannot save image for prompt {idx}: not a PIL Image")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to save image for prompt {idx}: {e}")
             
-            # 4. 품질 점수 계산
-            quality_score = self.clip_calculator.calculate_quality_reward(image)
-            result['quality_score'] = quality_score
+            # 4. CLIP 점수 계산
+            if hasattr(self.clip_calculator, 'calculate_comprehensive_reward'):
+                # 새로운 종합 보상 계산 방식
+                rewards = self.clip_calculator.calculate_comprehensive_reward(image, user_prompt, enhanced_prompt)
+                result['clip_score'] = rewards.get('clip_similarity', 0.0)
+                result['quality_score'] = rewards.get('image_quality', 0.0)
+            else:
+                # 기존 방식 (호환성)
+                clip_score = self.clip_calculator.calculate_reward(image, enhanced_prompt)
+                result['clip_score'] = clip_score
+                
+                quality_score = self.clip_calculator.calculate_quality_reward(image)
+                result['quality_score'] = quality_score
             
             # 5. 처리 시간 기록
             result['processing_time'] = time.time() - start_time
             
             # 성공 기준: CLIP 점수가 임계값 이상
-            if clip_score > 0.3:  # 임계값은 조정 가능
+            if result['clip_score'] > 0.3:  # 임계값은 조정 가능
                 result['success'] = True
             
         except Exception as e:

@@ -465,23 +465,74 @@ class VLMGRPOSystem:
                 logger.warning("⚠️ No validation data available")
                 return
             
-            # 검증 실행
+            # 검증 실행 (이미지 저장 포함)
             if self.validator is None:
                 logger.warning("⚠️ Validator not initialized, skipping validation")
                 return
-                
-            val_results = self.validator.evaluate_batch(val_data[:10])  # 처음 10개만
+            
+            # 이미지 저장 설정 확인
+            save_images = self.config.get("output_settings", {}).get("save_images", True)
+            output_dir = self.config.get("output_settings", {}).get("output_dir", "vlm_grpo_results")
+            
+            val_results = self.validator.evaluate_batch(
+                val_data[:10],  # 처음 10개만
+                save_images=save_images,
+                output_dir=output_dir,
+                iteration=iteration
+            )
             
             # 결과 로깅
             logger.info(f"📊 Validation Results (Iteration {iteration}):")
             for metric, value in val_results.items():
-                logger.info(f"  - {metric}: {value:.4f}")
+                if isinstance(value, (int, float)):
+                    logger.info(f"  - {metric}: {value:.4f}")
+            
+            # 이미지 저장 결과 로깅
+            if save_images and val_results.get('saved_images'):
+                saved_count = len(val_results['saved_images'])
+                logger.info(f"💾 Saved {saved_count} validation images")
+                
+                # 저장된 이미지 정보 로깅 (처음 3개만)
+                for i, img_info in enumerate(val_results['saved_images'][:3]):
+                    logger.info(f"  📸 Image {i+1}:")
+                    logger.info(f"    Original: '{img_info['prompt'][:30]}...'")
+                    logger.info(f"    Enhanced: '{img_info['enhanced_prompt'][:50]}...'")
+                    logger.info(f"    Enhanced Path: {img_info['image_path']}")
+                    if 'saved_original_path' in img_info:
+                        logger.info(f"    Original Path: {img_info['saved_original_path']}")
+                    if 'saved_prompts_path' in img_info:
+                        logger.info(f"    Prompts File: {img_info['saved_prompts_path']}")
+                    logger.info(f"    CLIP Score: {img_info['clip_score']:.3f}")
+                    logger.info("")
             
             # Wandb 로깅
             if hasattr(self, 'wandb_logger') and self.wandb_logger:
-                wandb_val_metrics = {f'val_{k}': v for k, v in val_results.items()}
-                wandb_val_metrics['iteration'] = iteration
                 self.wandb_logger.log_validation_results(val_results)
+                
+                # 이미지도 wandb에 업로드 (가능한 경우)
+                if save_images and val_results.get('saved_images'):
+                    try:
+                        from PIL import Image
+                        images_for_wandb = []
+                        captions_for_wandb = []
+                        
+                        for img_info in val_results['saved_images'][:5]:  # 처음 5개만
+                            try:
+                                img_path = img_info['image_path']
+                                if os.path.exists(img_path):
+                                    pil_image = Image.open(img_path)
+                                    images_for_wandb.append(pil_image)
+                                    caption = f"Iter {iteration}: {img_info['prompt'][:30]}... (CLIP: {img_info['clip_score']:.3f})"
+                                    captions_for_wandb.append(caption)
+                            except Exception as e:
+                                logger.warning(f"⚠️ Failed to load image for wandb: {e}")
+                        
+                        if images_for_wandb:
+                            self.wandb_logger.log_images(images_for_wandb, captions_for_wandb, step=iteration)
+                            logger.info(f"📈 Uploaded {len(images_for_wandb)} images to wandb")
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to upload images to wandb: {e}")
                 
         except Exception as e:
             logger.error(f"❌ Validation failed: {e}")
