@@ -21,6 +21,7 @@ from typing import List, Dict, Optional, Union, Tuple
 import logging
 import os
 import numpy as np
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +33,14 @@ class SD3Generator:
     GRPO 학습에서는 생성된 이미지가 CLIP 보상 계산에 사용됩니다.
     
     Attributes:
-        model_name (str): 사용할 SD3 모델 이름
+        model_name (str): 사용할 SD3 모델 이름 (config에서 읽어옴)
         pipeline: Diffusion 파이프라인 객체
         device: 연산 디바이스
         generation_config (dict): 이미지 생성 설정
     """
     
     def __init__(self,
-                 model_name: str = "stabilityai/stable-diffusion-3-medium",
+                 config_path: str = "config/default_config.json",
                  device: str = "auto",
                  height: int = 1024,
                  width: int = 1024,
@@ -49,14 +50,24 @@ class SD3Generator:
         SD3 Generator 초기화
         
         Args:
-            model_name (str): 사용할 SD3 모델 이름
+            config_path (str): 설정 파일 경로 (모델 이름을 여기서 읽어옴)
             device (str): 디바이스 설정 ("auto", "mps", "cuda", "cpu")
             height (int): 생성할 이미지 높이 (SD3는 1024x1024 권장)
             width (int): 생성할 이미지 너비
             num_inference_steps (int): 추론 스텝 수 (SD3는 28스텝 권장)
             guidance_scale (float): 가이던스 스케일 (SD3는 7.0 권장)
         """
-        self.model_name = model_name
+        
+        # 설정 파일에서 모델 이름 읽기
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            self.model_name = config['model_settings']['sd_model']
+            logger.info(f"📄 Loaded SD model name from config: {self.model_name}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load config: {e}, using default model")
+            self.model_name = "stabilityai/stable-diffusion-3-medium"
+        
         self.height = height
         self.width = width
         self.num_inference_steps = num_inference_steps
@@ -387,7 +398,7 @@ if __name__ == "__main__":
     try:
         # SD3 생성기 초기화
         generator = SD3Generator(
-            model_name="stabilityai/stable-diffusion-3-medium",
+            config_path="config/default_config.json",
             device="auto",
             height=1024,  # SD3 권장 크기
             width=1024,

@@ -89,15 +89,15 @@ class VLMGRPOSystem:
     5. 결과 분석 및 저장
     """
     
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: str = "config/default_config.json"):
         """
         VLM GRPO System 초기화
         
         Args:
-            config_path (str, optional): 설정 파일 경로
+            config_path (str): 설정 파일 경로
         """
-        # 설정 로딩
-        self.config = self._load_config(config_path)
+        self.config_path = config_path
+        self.config = self._load_config()
         
         # 로깅 설정
         self._setup_logging()
@@ -122,57 +122,16 @@ class VLMGRPOSystem:
         
         logger.info("🚀 VLM GRPO System initialized")
     
-    def _load_config(self, config_path: Optional[str]) -> Dict:
-        """
-        설정 파일 로딩 또는 기본 설정 생성
-        
-        Args:
-            config_path (str, optional): 설정 파일 경로
-            
-        Returns:
-            Dict: 시스템 설정
-        """
-        default_config = {
-            # 모델 설정
-            "vlm_model": "microsoft/DialoGPT-medium",
-            "sd_model": "runwayml/stable-diffusion-v1-5", 
-            "clip_model": "openai/clip-vit-base-patch32",
-            
-            # 학습 설정
-            "learning_rate": 1e-5,
-            "group_size": 4,
-            "num_iterations": 50,
-            "grpo_epochs": 2,
-            "validation_interval": 5,
-            
-            # 데이터 설정
-            "train_data_path": "train_prompts.jsonl",
-            "val_data_path": "val_prompts.jsonl",
-            
-            # 출력 설정
-            "output_dir": "vlm_grpo_results",
-            "checkpoint_interval": 10,
-            "save_images": True,
-            
-            # Wandb 설정
-            "use_wandb": True,
-            "wandb_project": "vlm-grpo-training",
-            "wandb_entity": None,
-            
-            # 디바이스 설정
-            "device": "auto"
-        }
-        
-        if config_path and Path(config_path).exists():
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    user_config = json.load(f)
-                default_config.update(user_config)
-                logger.info(f"📥 Config loaded from {config_path}")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to load config: {e}, using defaults")
-        
-        return default_config
+    def _load_config(self) -> Dict[str, Any]:
+        """설정 파일 로드"""
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            logger.info(f"📄 Configuration loaded from {self.config_path}")
+            return config
+        except Exception as e:
+            logger.error(f"❌ Failed to load config: {e}")
+            raise
     
     def _setup_logging(self):
         """로깅 설정"""
@@ -206,8 +165,11 @@ class VLMGRPOSystem:
             if VLMWrapper is None:
                 raise ImportError("VLMWrapper not available. Please install required dependencies.")
             self.vlm = VLMWrapper(
-                model_name=self.config["vlm_model"],
-                device=self.config["device"]
+                config_path=self.config_path,
+                device=self.config['system_settings']['device'],
+                max_new_tokens=self.config['generation_settings']['vlm_generation']['max_new_tokens'],
+                temperature=self.config['generation_settings']['vlm_generation']['temperature'],
+                top_p=self.config['generation_settings']['vlm_generation']['top_p']
             )
             
             # 2. SD3 Generator 초기화
@@ -215,8 +177,12 @@ class VLMGRPOSystem:
             if SD3Generator is None:
                 raise ImportError("SD3Generator not available. Please install required dependencies.")
             self.sd_generator = SD3Generator(
-                model_name=self.config["sd_model"],
-                device=self.config["device"]
+                config_path=self.config_path,
+                device=self.config['system_settings']['device'],
+                height=self.config['generation_settings']['sd_generation']['height'],
+                width=self.config['generation_settings']['sd_generation']['width'],
+                num_inference_steps=self.config['generation_settings']['sd_generation']['num_inference_steps'],
+                guidance_scale=self.config['generation_settings']['sd_generation']['guidance_scale']
             )
             
             # 3. CLIP Reward Calculator 초기화
@@ -224,8 +190,9 @@ class VLMGRPOSystem:
             if CLIPRewardCalculator is None:
                 raise ImportError("CLIPRewardCalculator not available. Please install required dependencies.")
             self.clip_calculator = CLIPRewardCalculator(
-                model_name=self.config["clip_model"],
-                device=self.config["device"]
+                model_name=self.config['model_settings']['clip_model'],
+                device=self.config['system_settings']['device'],
+                reward_weights=self.config['reward_settings']['reward_weights']
             )
             
             # 4. Multi Reward Calculator 초기화
@@ -240,9 +207,18 @@ class VLMGRPOSystem:
             if GRPOTrainer is None or GRPOConfig is None:
                 raise ImportError("GRPO modules not available. Please install required dependencies.")
             grpo_config = GRPOConfig(
-                learning_rate=self.config["learning_rate"],
-                group_size=self.config["group_size"],
-                grpo_epochs=self.config["grpo_epochs"]
+                learning_rate=self.config['training_settings']['learning_rate'],
+                group_size=self.config['training_settings']['group_size'],
+                num_iterations=self.config['training_settings']['num_iterations'],
+                grpo_epochs=self.config['training_settings']['grpo_epochs'],
+                gamma=self.config['training_settings']['grpo_parameters']['gamma'],
+                kl_beta=self.config['training_settings']['grpo_parameters']['kl_beta'],
+                clip_epsilon=self.config['training_settings']['grpo_parameters']['clip_epsilon'],
+                entropy_coeff=self.config['training_settings']['grpo_parameters']['entropy_coeff'],
+                max_grad_norm=self.config['training_settings']['grpo_parameters']['max_grad_norm'],
+                max_new_tokens=self.config['generation_settings']['vlm_generation']['max_new_tokens'],
+                temperature=self.config['generation_settings']['vlm_generation']['temperature'],
+                device=self.config['system_settings']['device']
             )
             self.grpo_trainer = GRPOTrainer(
                 vlm_model=self.vlm,
@@ -254,8 +230,9 @@ class VLMGRPOSystem:
             if PromptDataLoader is None:
                 raise ImportError("PromptDataLoader not available. Please install required dependencies.")
             self.data_loader = PromptDataLoader(
-                train_data_path=self.config["train_data_path"],
-                val_data_path=self.config["val_data_path"]
+                train_data_path=self.config['data_settings']['train_data_path'],
+                val_data_path=self.config['data_settings']['val_data_path'],
+                batch_shuffle=self.config['data_settings']['batch_shuffle']
             )
             
             # 7. Validator 초기화

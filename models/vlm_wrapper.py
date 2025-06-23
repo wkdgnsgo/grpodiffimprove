@@ -19,6 +19,7 @@ import torch.nn as nn
 from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from typing import List, Dict, Optional, Union
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class VLMWrapper(nn.Module):
     변환하는 기능을 제공합니다.
     
     Attributes:
-        model_name (str): 사용할 Qwen2.5-VL 모델 이름
+        model_name (str): 사용할 Qwen2.5-VL 모델 이름 (config에서 읽어옴)
         tokenizer: 토크나이저 객체
         processor: 프로세서 객체
         model: Qwen2.5-VL 모델 객체
@@ -40,7 +41,7 @@ class VLMWrapper(nn.Module):
     """
     
     def __init__(self,
-                 model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct",
+                 config_path: str = "config/default_config.json",
                  device: str = "auto",
                  max_new_tokens: int = 100,
                  temperature: float = 0.7,
@@ -50,7 +51,7 @@ class VLMWrapper(nn.Module):
         VLM Wrapper 초기화
         
         Args:
-            model_name (str): 사용할 Qwen2.5-VL 모델 이름
+            config_path (str): 설정 파일 경로 (모델 이름을 여기서 읽어옴)
             device (str): 디바이스 설정 ("auto", "mps", "cuda", "cpu")
             max_new_tokens (int): 생성할 최대 토큰 수
             temperature (float): 생성 온도 (다양성 vs 일관성)
@@ -59,7 +60,15 @@ class VLMWrapper(nn.Module):
         """
         super().__init__()
         
-        self.model_name = model_name
+        # 설정 파일에서 모델 이름 읽기
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            self.model_name = config['model_settings']['vlm_model']
+            logger.info(f"📄 Loaded model name from config: {self.model_name}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load config: {e}, using default model")
+            self.model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
         
         # 디바이스 자동 선택
         if device == "auto":
@@ -109,6 +118,12 @@ class VLMWrapper(nn.Module):
                 padding_side="left"
             )
             
+            # 패딩 토큰 설정 (중요!)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+                logger.info("🔧 Set pad_token to eos_token")
+            
             # 프로세서 로드
             self.processor = AutoProcessor.from_pretrained(
                 self.model_name,
@@ -131,9 +146,6 @@ class VLMWrapper(nn.Module):
             self.model.eval()
             
             # 토큰 ID 설정
-            if self.tokenizer.pad_token_id is None:
-                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-            
             self.generation_config['pad_token_id'] = self.tokenizer.pad_token_id
             self.generation_config['eos_token_id'] = self.tokenizer.eos_token_id
             
@@ -150,6 +162,12 @@ class VLMWrapper(nn.Module):
                     trust_remote_code=True
                 )
                 
+                # 패딩 토큰 설정 (중요!)
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                    self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+                    logger.info("🔧 Set pad_token to eos_token for fallback model")
+                
                 # 간단한 텍스트 생성 모델로 대체
                 from transformers import AutoModelForCausalLM
                 self.model = AutoModelForCausalLM.from_pretrained(
@@ -161,11 +179,11 @@ class VLMWrapper(nn.Module):
                 self.model = self.model.to(self.device)
                 self.model.eval()
                 
-                if self.tokenizer.pad_token_id is None:
-                    self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-                
                 self.generation_config['pad_token_id'] = self.tokenizer.pad_token_id
                 self.generation_config['eos_token_id'] = self.tokenizer.eos_token_id
+                
+                # 프로세서를 None으로 설정 (fallback에서는 사용하지 않음)
+                self.processor = None
                 
                 logger.info(f"✅ Fallback model loaded successfully on {self.device}")
                 
@@ -198,32 +216,43 @@ class VLMWrapper(nn.Module):
             # 프롬프트 템플릿 적용
             enhanced_prompt_template = self._create_enhancement_template(user_prompt)
         
-            # Qwen2.5-VL 스타일 메시지 형식
-            messages = [
-                {
-                    "role": "system", 
-                    "content": "You are an expert in creating detailed, artistic image generation prompts. Transform simple prompts into rich, descriptive ones."
-                },
-                {
-                    "role": "user", 
-                    "content": enhanced_prompt_template
-                }
-            ]
-            
-            # 채팅 템플릿 적용
-            text = self.processor.apply_chat_template(
-                messages, 
-                tokenize=False, 
-                add_generation_prompt=True
-            )
-            
-            # 토크나이징
-            inputs = self.processor(
-                text=[text],
-                images=None,  # 텍스트만 처리
-                padding=True,
-                return_tensors="pt"
-            ).to(self.device)
+            if self.processor is not None:
+                # Qwen2.5-VL 스타일 메시지 형식
+                messages = [
+                    {
+                        "role": "system", 
+                        "content": "You are an expert in creating detailed, artistic image generation prompts. Transform simple prompts into rich, descriptive ones."
+                    },
+                    {
+                        "role": "user", 
+                        "content": enhanced_prompt_template
+                    }
+                ]
+                
+                # 채팅 템플릿 적용
+                text = self.processor.apply_chat_template(
+                    messages, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
+                
+                # 토크나이징
+                inputs = self.processor(
+                    text=[text],
+                    images=None,  # 텍스트만 처리
+                    padding=True,
+                    return_tensors="pt"
+                ).to(self.device)
+            else:
+                # 대안 방식 (fallback 모델용)
+                text = f"Human: {enhanced_prompt_template}\n\nAssistant:"
+                inputs = self.tokenizer(
+                    text, 
+                    return_tensors="pt", 
+                    padding=True, 
+                    truncation=True,
+                    max_length=512
+                ).to(self.device)
         
             # 텍스트 생성
             with torch.no_grad():
@@ -234,10 +263,16 @@ class VLMWrapper(nn.Module):
         
             # 디코딩 및 후처리
             output_ids = outputs[0][inputs.input_ids.shape[1]:]
-            generated_text = self.processor.decode(
-                output_ids, 
-                skip_special_tokens=True
-            )
+            if self.processor is not None:
+                generated_text = self.processor.decode(
+                    output_ids, 
+                    skip_special_tokens=True
+                )
+            else:
+                generated_text = self.tokenizer.decode(
+                    output_ids, 
+                    skip_special_tokens=True
+                )
         
             # 개선된 프롬프트 추출 및 정제
             enhanced_prompt = self._extract_enhanced_prompt(
@@ -398,7 +433,7 @@ if __name__ == "__main__":
     try:
         # VLM 래퍼 초기화
         vlm = VLMWrapper(
-            model_name="Qwen/Qwen2.5-VL-7B-Instruct",
+            config_path="config/default_config.json",
             device="auto",
             max_new_tokens=100,
             temperature=0.7
