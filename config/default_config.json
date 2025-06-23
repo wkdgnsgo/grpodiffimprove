@@ -19,11 +19,14 @@
     "checkpoint_interval": 10,
 
     "grpo_parameters": {
+      "_comment": "GRPO 알고리즘 파라미터 - 논문 기반 설정 (Shao et al. 2024)",
       "gamma": 0.99,
       "kl_beta": 0.01,
       "clip_epsilon": 0.2,
       "entropy_coeff": 0.01,
-      "max_grad_norm": 1.0
+      "max_grad_norm": 1.0,
+      "epsilon_std": 1e-8,
+      "_paper_reference": "DeepSeekMath: Pushing the Limits of Mathematical Reasoning (Shao et al., 2024)"
     }
   },
 
@@ -51,7 +54,9 @@
   },
 
   "reward_settings": {
-    "_comment": "보상 계산 설정",
+    "_comment": "보상 계산 설정 - GRPO 논문 기반",
+    "_paper_reference": "Based on GRPO verifiable rewards (Shao et al. 2024, Mroueh 2025)",
+
     "reward_weights": {
       "clip_similarity": 0.6,
       "image_quality": 0.3,
@@ -59,7 +64,31 @@
     },
     "reward_scale": 1.0,
     "reward_offset": 0.0,
-    "temperature": 1.0
+    "temperature": 1.0,
+
+    "verifiable_rewards": {
+      "_comment": "논문에서 제시하는 verifiable rewards 설정",
+      "enabled": true,
+      "binary_rewards": true,
+      "_description": "Binary rewards (0/1) for verifiable correctness as used in DeepSeek-R1",
+      "reward_clipping": {
+        "enabled": true,
+        "min_value": 0.0,
+        "max_value": 1.0
+      },
+      "variance_masking": {
+        "enabled": true,
+        "_description": "Mask zero variance samples as suggested in DAPO paper"
+      }
+    },
+
+    "advantage_calculation": {
+      "_comment": "GRPO 어드밴티지 계산 설정 - 논문 기반",
+      "whitening_enabled": true,
+      "group_normalization": true,
+      "epsilon_stabilization": 1e-8,
+      "_description": "Group-based whitening as described in GRPO paper"
+    }
   },
 
   "output_settings": {
@@ -77,8 +106,8 @@
     "use_wandb": true,
     "project": "vlm-grpo-training",
     "entity": null,
-    "tags": ["vlm", "grpo", "text-to-image"],
-    "notes": "VLM GRPO training experiment"
+    "tags": ["vlm", "grpo", "text-to-image", "verifiable-rewards"],
+    "notes": "VLM GRPO training with paper-based verifiable rewards"
   },
 
   "system_settings": {
