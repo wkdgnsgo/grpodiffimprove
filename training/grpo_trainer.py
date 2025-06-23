@@ -178,12 +178,12 @@ class GRPOTrainer:
                 
             except Exception as e:
                 logger.warning(f"⚠️ Failed to process prompt '{prompt}': {e}")
-                # 실패한 경우 기본값 사용
+                # 실패한 경우 기본값 사용 (일관된 텐서 속성으로)
                 group_data['enhanced_prompts'].append(prompt)
                 group_data['images'].append(None)
                 group_data['rewards'].append(0.0)
-                group_data['log_probs'].append(torch.tensor(0.0))
-                group_data['ref_log_probs'].append(torch.tensor(0.0))
+                group_data['log_probs'].append(torch.tensor(-2.0, dtype=torch.float32, requires_grad=True))
+                group_data['ref_log_probs'].append(torch.tensor(-2.0, dtype=torch.float32))
         
         # 5. 어드밴티지 및 리턴 계산
         self._calculate_advantages_and_returns(group_data)
@@ -407,20 +407,30 @@ class GRPOTrainer:
                 try:
                     # 현재 로그 확률과 참조 로그 확률 가져오기
                     current_log_prob = current_log_probs[i]
-                    ref_log_prob = group_data['ref_log_probs'][i]
+                    
+                    # ref_log_probs 키 안전하게 접근
+                    if 'ref_log_probs' not in group_data or i >= len(group_data['ref_log_probs']):
+                        logger.warning(f"⚠️ Missing ref_log_probs for sample {i}")
+                        ref_log_prob = torch.tensor(-1.2, dtype=torch.float32)
+                    else:
+                        ref_log_prob = group_data['ref_log_probs'][i]
                     
                     # 텐서로 변환 (필요시)
                     if not isinstance(ref_log_prob, torch.Tensor):
                         ref_log_prob = torch.tensor(float(ref_log_prob), dtype=torch.float32)
                     
+                    # advantages 키 안전하게 접근
+                    if 'advantages' not in group_data or i >= len(group_data['advantages']):
+                        logger.warning(f"⚠️ Missing advantages for sample {i}")
+                        advantage = torch.tensor(0.0, dtype=torch.float32)
+                    else:
+                        advantage = group_data['advantages'][i]
+                        if not isinstance(advantage, torch.Tensor):
+                            advantage = torch.tensor(float(advantage), dtype=torch.float32)
+                    
                     # 정책 비율 계산: π_θ(a|s) / π_ref(a|s)
                     log_ratio = current_log_prob - ref_log_prob
                     ratio = torch.exp(log_ratio)
-                    
-                    # 어드밴티지
-                    advantage = group_data['advantages'][i]
-                    if not isinstance(advantage, torch.Tensor):
-                        advantage = torch.tensor(float(advantage), dtype=torch.float32)
                     
                     # 클리핑된 서로게이트 손실 (PPO 스타일)
                     surr1 = ratio * advantage
