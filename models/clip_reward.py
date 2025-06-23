@@ -46,7 +46,8 @@ class CLIPRewardCalculator:
                  device: str = "auto",
                  reward_scale: float = 1.0,
                  reward_offset: float = 0.0,
-                 temperature: float = 1.0):
+                 temperature: float = 1.0,
+                 reward_weights: Optional[Dict[str, float]] = None):
         """
         CLIP Reward Calculator 초기화
         
@@ -56,11 +57,24 @@ class CLIPRewardCalculator:
             reward_scale (float): 보상 스케일링 팩터
             reward_offset (float): 보상 오프셋
             temperature (float): 소프트맥스 온도 (유사도 조절)
+            reward_weights (Dict[str, float], optional): 다중 보상 가중치
         """
         self.model_name = model_name
         self.reward_scale = reward_scale
         self.reward_offset = reward_offset
         self.temperature = temperature
+        
+        # 다중 보상 가중치 설정
+        if reward_weights is None:
+            self.reward_weights = {
+                'clip_similarity': 0.6,
+                'image_quality': 0.3,
+                'semantic_consistency': 0.1
+            }
+        else:
+            self.reward_weights = reward_weights
+            
+        logger.info(f"🎯 Multi-reward weights: {self.reward_weights}")
         
         # 디바이스 자동 선택
         if device == "auto":

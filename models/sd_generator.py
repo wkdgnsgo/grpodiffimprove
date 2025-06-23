@@ -116,7 +116,7 @@ class SD3Generator:
             
             # SD3 모델인지 확인하여 적절한 로딩 방식 선택
             if "stable-diffusion-3" in self.model_name.lower():
-                # SD3 전용 로딩 방식
+                # SD3 전용 로딩 방식 (diffusers 호환 버전)
                 try:
                     self.pipeline = StableDiffusion3Pipeline.from_pretrained(
                         self.model_name,
@@ -124,6 +124,7 @@ class SD3Generator:
                         use_safetensors=True,
                         variant="fp16" if self.device in ['cuda', 'mps'] else None
                     )
+                    logger.info("✅ SD3 loaded with StableDiffusion3Pipeline")
                 except Exception as e:
                     logger.warning(f"⚠️ SD3 specific loading failed: {e}, trying generic method")
                     # SD3 전용 로딩 실패 시 일반 방식으로 시도
@@ -133,6 +134,7 @@ class SD3Generator:
                         use_safetensors=True,
                         variant="fp16" if self.device in ['cuda', 'mps'] else None
                     )
+                    logger.info("✅ SD3 loaded with DiffusionPipeline")
             else:
                 # 일반 SD 모델 로딩
                 self.pipeline = DiffusionPipeline.from_pretrained(
@@ -141,6 +143,7 @@ class SD3Generator:
                     use_safetensors=True,
                     variant="fp16" if self.device in ['cuda', 'mps'] else None
                 )
+                logger.info("✅ SD model loaded with DiffusionPipeline")
             
             # 디바이스로 이동
             self.pipeline = self.pipeline.to(self.device)

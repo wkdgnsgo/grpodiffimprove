@@ -185,3 +185,15 @@ installation page: https://pytorch.org/get-started/locally/ and follow the ones 
 Please note that you may need to restart your runtime after installation.
 
 2025-06-23 16:21:13,805 - models.vlm_wrapper - INFO - 🔄 Trying fallback loading method...
+2025-06-23 16:27:55,569 - integration.main_trainer - INFO - 🚀 VLM GRPO System initialized
+2025-06-23 16:27:55,569 - integration.main_trainer - INFO - 🔧 Initializing components...
+2025-06-23 16:27:55,569 - integration.main_trainer - INFO - 📝 Initializing VLM...
+2025-06-23 16:27:55,569 - models.vlm_wrapper - INFO - 📄 Loaded model name from config: Qwen/Qwen2.5-VL-7B-Instruct
+2025-06-23 16:27:55,569 - models.vlm_wrapper - INFO - 🍎 Using Apple Silicon MPS for Qwen2.5-VL
+2025-06-23 16:27:55,569 - models.vlm_wrapper - INFO - 📥 Loading Qwen2.5-VL model: Qwen/Qwen2.5-VL-7B-Instruct
+2025-06-23 16:27:57,648 - models.vlm_wrapper - ERROR - ❌ Failed to load Qwen2.5-VL model: 
+AutoVideoProcessor requires the Torchvision library but it was not found in your environment. Checkout the instructions on the
+installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+Please note that you may need to restart your runtime after installation.
+
+2025-06-23 16:27:57,649 - models.vlm_wrapper - INFO - 🔄 Trying fallback loading method...
