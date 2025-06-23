@@ -36,22 +36,20 @@ class MultiGPUConfig:
         
     def setup_environment(self):
         """환경 변수 및 CUDA 설정"""
-        # CUDA_VISIBLE_DEVICES 설정
-        gpu_str = ','.join(map(str, self.gpu_ids))
-        os.environ['CUDA_VISIBLE_DEVICES'] = gpu_str
+        # GPU 환경 변수 설정
+        gpu_env_vars = {
+            'CUDA_VISIBLE_DEVICES': ','.join(map(str, self.gpu_ids)),
+            'CUDA_LAUNCH_BLOCKING': '0',  # 비동기 실행 활성화
+            'TORCH_CUDA_ARCH_LIST': '8.0;8.6;8.9;9.0',  # 최신 아키텍처 지원
+            'PYTORCH_CUDA_ALLOC_CONF': 'max_split_size_mb:512',  # 메모리 관리 최적화
+            'NCCL_DEBUG': 'INFO',  # Multi-GPU 통신 디버깅
+            'NCCL_IB_DISABLE': '1',  # InfiniBand 비활성화 (필요시)
+        }
         
-        logger.info(f"🔧 CUDA_VISIBLE_DEVICES set to: {gpu_str}")
-        
-        # 기타 CUDA 최적화 설정
-        os.environ['CUDA_LAUNCH_BLOCKING'] = '0'  # 비동기 실행 활성화
-        os.environ['TORCH_CUDA_ARCH_LIST'] = '8.0;8.6;8.9;9.0'  # 최신 아키텍처 지원
-        
-        # 메모리 관리 최적화
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
-        
-        # Multi-GPU 통신 최적화
-        os.environ['NCCL_DEBUG'] = 'INFO'
-        os.environ['NCCL_IB_DISABLE'] = '1'  # InfiniBand 비활성화 (필요시)
+        # 환경 변수 적용
+        for key, value in gpu_env_vars.items():
+            os.environ[key] = value
+            logger.info(f"🔧 {key} = {value}")
         
         logger.info("🚀 Multi-GPU environment configured")
         
