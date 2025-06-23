@@ -242,9 +242,9 @@ class VLMGRPOSystem:
                 self.data_loader = None
             else:
                 self.data_loader: PromptDataLoader = PromptDataLoader(
-                    train_file=self.config['data_settings']['train_prompts_file'],
-                    val_file=self.config['data_settings']['val_prompts_file'],
-                    batch_size=self.config['training_settings']['group_size']
+                    train_data_path=self.config['data_settings']['train_prompts_file'],
+                    val_data_path=self.config['data_settings']['val_prompts_file'],
+                    batch_shuffle=self.config['data_settings'].get('batch_shuffle', True)
                 )
                 logger.info("✅ Data Loader initialized")
             
@@ -304,7 +304,7 @@ class VLMGRPOSystem:
         
         # --- Get Training Prompts ---
         if self.data_loader is not None:
-            train_prompts = self.data_loader.get_train_prompts()
+            train_prompts = self.data_loader.get_training_batch(batch_size=GROUP_SIZE * 10)  # 충분한 프롬프트 확보
         else:
             # Default prompts if data loader not available
             train_prompts = [
