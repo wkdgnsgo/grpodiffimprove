@@ -268,8 +268,7 @@ class GRPOTrainer:
                 # CLIP으로 보상 계산
                 reward = self.clip_reward.calculate_reward(
                     image=generated_image,
-                    text=generated_text,
-                    original_prompt=prompt
+                    text=generated_text
                 )
             except Exception as e:
                 logger.warning(f"⚠️ Image generation/reward failed: {e}")
