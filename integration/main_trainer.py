@@ -61,7 +61,7 @@ except ImportError as e:
     print(f"⚠️ GRPO modules import warning: {e}")
 
 try:
-    from utils.data_loader import PromptDataLoader
+    from utils.data_loader import DataLoader
 except ImportError as e:
     print(f"⚠️ DataLoader import warning: {e}")
 
@@ -227,13 +227,15 @@ class VLMGRPOSystem:
             
             # 6. Data Loader 초기화
             logger.info("📊 Initializing Data Loader...")
-            if PromptDataLoader is None:
-                raise ImportError("PromptDataLoader not available. Please install required dependencies.")
-            self.data_loader = PromptDataLoader(
-                train_data_path=self.config['data_settings']['train_data_path'],
-                val_data_path=self.config['data_settings']['val_data_path'],
-                batch_shuffle=self.config['data_settings']['batch_shuffle']
-            )
+            try:
+                self.data_loader = DataLoader(
+                    train_data_path=self.config['data_settings']['train_data_path'],
+                    val_data_path=self.config['data_settings']['val_data_path'],
+                    batch_shuffle=self.config['data_settings']['batch_shuffle']
+                )
+            except Exception as e:
+                logger.error(f"❌ Data Loader initialization failed: {e}")
+                self.data_loader = None
             
             # 7. Validator 초기화
             logger.info("✅ Initializing Validator...")

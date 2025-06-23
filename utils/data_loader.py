@@ -35,16 +35,19 @@ class PromptDataLoader:
     
     def __init__(self, 
                  train_data_path: str = "train_prompts.jsonl",
-                 val_data_path: str = "val_prompts.jsonl"):
+                 val_data_path: str = "val_prompts.jsonl",
+                 batch_shuffle: bool = True):
         """
         Data Loader 초기화
         
         Args:
             train_data_path (str): 학습 데이터 경로
             val_data_path (str): 검증 데이터 경로
+            batch_shuffle (bool): 배치 생성 시 셔플 여부
         """
         self.train_data_path = train_data_path
         self.val_data_path = val_data_path
+        self.batch_shuffle = batch_shuffle
         
         # 데이터 저장소
         self.train_data = []
@@ -131,13 +134,13 @@ class PromptDataLoader:
         
         logger.info(f"📊 Data statistics: {self.stats}")
     
-    def get_training_batch(self, batch_size: int, shuffle: bool = True) -> List[str]:
+    def get_training_batch(self, batch_size: int, shuffle: Optional[bool] = None) -> List[str]:
         """
         학습용 배치 생성
         
         Args:
             batch_size (int): 배치 크기
-            shuffle (bool): 셔플 여부
+            shuffle (bool, optional): 셔플 여부 (None이면 기본 설정 사용)
             
         Returns:
             List[str]: 프롬프트 배치
@@ -145,6 +148,10 @@ class PromptDataLoader:
         if not self.train_data:
             logger.warning("⚠️ No training data available")
             return []
+        
+        # 셔플 설정 결정
+        if shuffle is None:
+            shuffle = self.batch_shuffle
         
         # 데이터 복사 및 셔플
         data = self.train_data.copy()
@@ -313,6 +320,8 @@ class PromptDataLoader:
         except Exception as e:
             logger.error(f"❌ Failed to save batch results: {e}")
 
+# 호환성을 위한 별칭 생성
+DataLoader = PromptDataLoader
 
 def create_sample_data(train_path: str = "train_prompts.jsonl", 
                       val_path: str = "val_prompts.jsonl"):
