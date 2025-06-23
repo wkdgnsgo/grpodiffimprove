@@ -188,6 +188,22 @@ class GRPOTrainer:
         # 5. 어드밴티지 및 리턴 계산
         self._calculate_advantages_and_returns(group_data)
         
+        # 6. 데이터 완성도 최종 검증
+        logger.debug(f"📊 Final group data lengths:")
+        for key, value in group_data.items():
+            logger.debug(f"  - {key}: {len(value) if isinstance(value, list) else 'N/A'}")
+        
+        # 7. ref_log_probs와 advantages 존재 확인
+        if 'ref_log_probs' in group_data and len(group_data['ref_log_probs']) > 0:
+            logger.debug(f"✅ ref_log_probs available: {len(group_data['ref_log_probs'])} items")
+        else:
+            logger.warning(f"⚠️ ref_log_probs missing or empty")
+            
+        if 'advantages' in group_data and len(group_data['advantages']) > 0:
+            logger.debug(f"✅ advantages available: {len(group_data['advantages'])} items")
+        else:
+            logger.warning(f"⚠️ advantages missing or empty")
+        
         logger.debug(f"✅ Group data collected: avg_reward={np.mean(group_data['rewards']):.4f}")
         return group_data
     
@@ -405,6 +421,12 @@ class GRPOTrainer:
             Dict[str, float]: 에포크 메트릭
         """
         try:
+            # 입력 데이터 검증
+            logger.debug(f"🔍 Epoch update input validation:")
+            logger.debug(f"  - prompts: {len(group_data.get('prompts', []))}")
+            logger.debug(f"  - ref_log_probs: {len(group_data.get('ref_log_probs', []))}")
+            logger.debug(f"  - advantages: {len(group_data.get('advantages', []))}")
+            
             self.optimizer.zero_grad()
             
             # 현재 정책으로 로그 확률 재계산 (정책이 업데이트되었으므로)

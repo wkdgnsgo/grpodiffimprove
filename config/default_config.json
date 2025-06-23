@@ -15,7 +15,7 @@
     "group_size": 4,
     "num_iterations": 50,
     "grpo_epochs": 2,
-    "validation_interval": 5,
+    "validation_interval": 1,
     "checkpoint_interval": 10,
 
     "grpo_parameters": {
