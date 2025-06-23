@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_config(config_path: str = None) -> dict:
+def load_config(config_path: str = "None") -> dict:
     """설정 파일 로드"""
     if config_path is None:
         config_path = current_dir / "config" / "default_config.json"

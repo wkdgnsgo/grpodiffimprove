@@ -364,4 +364,23 @@ if __name__ == "__main__":
     print("\nUsage:")
     print("from models.vlm_wrapper import VLMWrapper")
     print("vlm = VLMWrapper()")
-    print("enhanced = vlm.enhance_prompt('a cat')") 
+    print("enhanced = vlm.enhance_prompt('a cat')")
+
+    # 참조 글과 일치하는 구현:
+    for step in range(max_new_tokens):
+        # state_t = user_prompt + 지금까지_생성된_토큰들
+        current_state = current_sequence.clone()
+        
+        # action_t = 다음_토큰_선택  
+        policy_dist = policy_network(current_sequence)
+        next_token = policy_dist.sample()
+        
+        # 시퀀스 업데이트
+        current_sequence = torch.cat([current_sequence, next_token])
+        
+        if next_token == EOS: break
+
+    # 환경 실행: 동결된 파이프라인
+    generated_text = tokenizer.decode(current_sequence)
+    image = sd_generator.generate_image(generated_text)  # 동결된 SD3
+    reward = clip_reward.calculate_reward(image, text)   # 동결된 CLIP 

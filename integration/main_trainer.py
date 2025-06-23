@@ -215,12 +215,17 @@ class VLMGRPOSystem:
                 clip_epsilon=self.config['training_settings']['grpo_parameters']['clip_epsilon'],
                 entropy_coeff=self.config['training_settings']['grpo_parameters']['entropy_coeff'],
                 max_grad_norm=self.config['training_settings']['grpo_parameters']['max_grad_norm'],
+                epsilon_std=self.config['training_settings']['grpo_parameters']['epsilon_std'],
                 max_new_tokens=self.config['generation_settings']['vlm_generation']['max_new_tokens'],
+                vocab_size=50000,  # GPT-2 기본 vocab 크기
+                max_sequence_length=100,  # 최대 시퀀스 길이
                 temperature=self.config['generation_settings']['vlm_generation']['temperature'],
                 device=self.config['system_settings']['device']
             )
             self.grpo_trainer = GRPOTrainer(
                 vlm_model=self.vlm,
+                sd_generator=self.sd_generator,
+                clip_reward=self.clip_calculator,
                 config=grpo_config
             )
             
@@ -308,14 +313,15 @@ class VLMGRPOSystem:
                     logger.warning("⚠️ No training data available, skipping iteration")
                     continue
                 
-                # 2. 그룹 데이터 수집 (VLM + SD3 + CLIP)
-                group_data = self._collect_training_data(batch_prompts)
-                
-                # 3. GRPO 업데이트
+                # 2. GRPO 그룹 데이터 수집 (토큰별 순차 생성)
                 if self.grpo_trainer is None:
                     logger.error("❌ GRPO trainer not initialized")
                     break
-                    
+                
+                # GRPOTrainer의 collect_group_data 메서드 사용
+                group_data = self.grpo_trainer.collect_group_data(batch_prompts)
+                
+                # 3. GRPO 업데이트
                 training_metrics = self.grpo_trainer.grpo_update(group_data)
                 
                 # 4. 메트릭 로깅
