@@ -1,315 +1,249 @@
-# VLM GRPO System 🚀
+# GRPO for QWEN VL Model 🚀
 
-**Vision Language Model + Group Relative Policy Optimization**
+**QWEN VL 모델을 GRPO 알고리즘으로 학습시키는 시스템**
 
-VLM을 사용하여 사용자 프롬프트를 개선하고, Stable Diffusion으로 이미지를 생성하며, CLIP으로 보상을 계산하는 강화학습 시스템입니다.
+CartPole GRPO 구현을 기반으로 QWEN VL 모델을 강화학습으로 학습시켜 더 나은 프롬프트 향상 능력을 획득하는 시스템입니다.
 
-## 시스템 구조 📋
-
-```
-User Prompt → VLM → Enhanced Prompt → SD3 → Image → CLIP Reward → GRPO Update
-```
-
-### 폴더 구조
+## 🎯 GRPO 학습 목적
 
 ```
-vlm_grpo_system/
-├── models/                 # 핵심 모델들
-│   ├── vlm_wrapper.py     # VLM 프롬프트 개선
-│   ├── sd_generator.py    # Stable Diffusion 이미지 생성
-│   └── clip_reward.py     # CLIP 보상 계산
-├── training/              # 학습 알고리즘
-│   └── grpo_trainer.py    # GRPO 트레이너
-├── utils/                 # 유틸리티
-│   └── data_loader.py     # 데이터 로딩
-├── evaluation/            # 평가 시스템
-│   └── validator.py       # 검증 평가기
-├── integration/           # 통합 시스템
-│   ├── main_trainer.py    # 메인 트레이너
-│   └── wandb_logger.py    # Wandb 로거
-├── config/                # 설정 파일
-│   └── default_config.json
-└── data/                  # 데이터 파일
+User Prompt → [QWEN VL Policy] → Action Selection → Enhanced Prompt → [SD3 Image] → [CLIP Reward] → Policy Update
 ```
 
-## 주요 기능 ✨
+**핵심 아이디어**:
 
-### 1. Models 폴더 - 핵심 모델들
+- **무제한 어휘**: 품질 토큰에 제한되지 않고 전체 어휘에서 자유롭게 선택
+- **Challenging Cases**: SD3가 어려워하는 색상 조합, 모순적 개념들도 학습
+- **창의적 프롬프트**: 이상한/추상적 프롬프트에서도 높은 보상을 얻는 모델 학습
 
-#### VLM Wrapper (`models/vlm_wrapper.py`)
+## 🚀 Challenging 프롬프트 예시
 
-- **목적**: 사용자의 간단한 프롬프트를 상세한 프롬프트로 개선
-- **입력**: "a cat"
-- **출력**: "a fluffy orange tabby cat sitting gracefully on a windowsill, soft natural lighting, professional pet photography"
-- **기능**:
-  - 프롬프트 템플릿 적용
-  - 텍스트 생성 파라미터 관리
-  - 배치 처리 지원
-  - 실패 시 fallback 처리
+**SD3가 어려워하는 케이스들:**
 
-#### SD3 Generator (`models/sd_generator.py`)
+- `"a purple rabbit eating carrots"` - 비현실적 색상 조합
+- `"a green cat with blue eyes"` - 기존 상식과 다른 색상
+- `"a square wheel rolling down a hill"` - 모순적/불가능한 조합
+- `"the concept of happiness as a creature"` - 추상적 개념의 구현
+- `"a transparent glass butterfly"` - 복잡한 재질과 형태
 
-- **목적**: 개선된 프롬프트로 고품질 이미지 생성
-- **기능**:
-  - Stable Diffusion 3 파이프라인
-  - 메모리 효율적 생성
-  - 이미지 품질 검증
-  - 배치 생성 지원
+**GRPO 학습 목표**: 이런 어려운 프롬프트들에서도 높은 CLIP 보상을 얻을 수 있는 창의적인 프롬프트 생성
 
-#### CLIP Reward Calculator (`models/clip_reward.py`)
+## 📁 프로젝트 구조
 
-- **목적**: 텍스트-이미지 유사도 기반 보상 계산
-- **기능**:
-  - 단일/배치 보상 계산
-  - 다중 보상 함수 (유사도, 품질, 일관성)
-  - 보상 정규화 및 스케일링
+```
+grpodiffimprove/
+├── models/
+│   ├── qwen_wrapper.py        # QWEN VL 래퍼 클래스
+│   └── clip_reward.py         # CLIP 보상 계산기
+├── test_qwen.py               # QWEN 테스트 스크립트
+├── test_clip_reward.py        # CLIP 보상 테스트 스크립트
+├── test_integrated_system.py  # 통합 시스템 테스트
+├── requirements.txt           # 의존성 패키지
+└── README.md                  # 이 파일
+```
 
-### 2. Training 폴더 - GRPO 학습 알고리즘
+## 🚀 설치 및 사용법
 
-#### GRPO Trainer (`training/grpo_trainer.py`)
+### 1. 의존성 설치
 
-- **목적**: Group Relative Policy Optimization 구현
-- **GRPO vs PPO 차이점**:
-  - PPO: 개별 샘플 기반 어드밴티지
-  - GRPO: 그룹 내 상대적 어드밴티지 (더 안정적)
-- **핵심 기능**:
-  - 그룹 기반 어드밴티지 계산
-  - 참조 모델 관리
-  - KL 발산 페널티
-  - 클리핑된 서로게이트 손실
+```bash
+pip install -r requirements.txt
+```
 
-### 3. Utils 폴더 - 유틸리티
+### 2. Multi-GPU GRPO 학습 실행 (권장)
 
-#### Data Loader (`utils/data_loader.py`)
+```bash
+# GPU 1, 2, 3번을 사용한 최적화된 학습
+./run_multi_gpu_training.sh
+```
 
-- **목적**: 학습/검증 데이터 관리
-- **기능**:
-  - JSONL 형식 데이터 로딩
-  - 카테고리/난이도별 배치 생성
-  - 균형잡힌 배치 생성
-  - 결과 저장
+### 3. 단일 GPU 학습 실행
 
-### 4. Integration 폴더 - 통합 시스템
+```bash
+python train_grpo.py
+```
 
-#### Main Trainer (`integration/main_trainer.py`)
+### 4. 테스트 실행
 
-- **목적**: 전체 시스템 통합 및 실행
-- **기능**:
-  - 모든 컴포넌트 초기화
-  - End-to-End 학습 파이프라인
-  - 실시간 모니터링
-  - 체크포인트 관리
+```bash
+# 전체 시스템 테스트
+python test_grpo_system.py
 
-## 사용법 🛠️
+# QWEN VL 프롬프트 향상 테스트
+python test_qwen.py
 
-### 1. 기본 설정
+# CLIP 보상 시스템 테스트
+python test_clip_reward.py
+
+# 통합 시스템 테스트 (QWEN VL + CLIP)
+python test_integrated_system.py
+```
+
+## 🧪 테스트 결과 예시
+
+### 통합 시스템 테스트
+
+```
+🏃‍♂️ Quick Integration Test
+--------------------------------------------------
+
+📝 User: "cat"
+✨ Enhanced: "a beautiful fluffy cat sitting gracefully, high quality, det..."
+🎯 Dummy Reward: 0.7680
+📊 Quality: 5.00/5.0
+
+📝 User: "sunset"
+✨ Enhanced: "stunning sunset over the ocean, golden hour lighting, cinema..."
+🎯 Dummy Reward: 0.7380
+📊 Quality: 5.00/5.0
+
+📝 User: "robot"
+✨ Enhanced: "futuristic robot with metallic finish, sci-fi environment, d..."
+🎯 Dummy Reward: 0.8960
+📊 Quality: 4.33/5.0
+
+✅ System pipeline working correctly!
+Key insight: Enhanced prompt generates image, but CLIP reward uses original user prompt!
+```
+
+### QWEN VL 프롬프트 향상
+
+```
+🚀 QWEN VL Prompt Enhancement Test
+==================================================
+📥 Loading QWEN VL model...
+✅ Model loaded: Qwen/Qwen2-VL-7B-Instruct
+🖥️  Device: mps
+
+🧪 Testing prompt enhancement...
+--------------------------------------------------
+
+[Test 1/8]
+📝 Original: a cat
+✨ Enhanced: a beautiful fluffy orange tabby cat sitting gracefully on a windowsill, soft natural lighting, professional pet photography, high quality, detailed fur texture, 4k resolution
+📏 Length: 5 -> 147
+🎯 Quality Score: 4.85/5.0
+```
+
+## 🔧 주요 기능
+
+### 1. QwenWrapper 클래스
+
+- **모델**: Qwen/Qwen2-VL-7B-Instruct (VL 모델 사용)
+- **자동 디바이스 선택**: CUDA > MPS > CPU
+- **템플릿 기반 프롬프트**: System + User 메시지 구조
+- **후처리**: 불필요한 텍스트 제거 및 정제
 
 ```python
-# 기본 설정으로 시스템 실행
-from integration.main_trainer import VLMGRPOSystem
+from models.qwen_wrapper import QwenWrapper
 
-system = VLMGRPOSystem()
-system.initialize_components()
-system.run_training()
+# 모델 초기화
+qwen = QwenWrapper()
+
+# 단일 프롬프트 향상
+result = qwen.enhance_prompt("a cat")
+print(result['enhanced_prompt'])
+
+# 배치 처리
+results = qwen.enhance_prompts_batch(["cat", "dog", "bird"])
 ```
 
-### 2. 커스텀 설정
+### 2. CLIPRewardCalculator 클래스
+
+- **모델**: openai/clip-vit-base-patch32
+- **보상 범위**: 0.0 ~ 1.0 (1.0에 가까울수록 높은 유사도)
+- **핵심**: Enhanced prompt가 아닌 **원본 user prompt**와 이미지 비교
 
 ```python
-# 커스텀 설정 파일 사용
-system = VLMGRPOSystem("config/my_config.json")
-```
-
-### 3. 개별 컴포넌트 사용
-
-```python
-# VLM만 사용
-from models.vlm_wrapper import VLMWrapper
-
-vlm = VLMWrapper()
-enhanced = vlm.enhance_prompt("a cat")
-print(enhanced)
-
-# SD3만 사용
-from models.sd_generator import SD3Generator
-
-generator = SD3Generator()
-image = generator.generate_image("beautiful landscape")
-
-# CLIP 보상만 사용
 from models.clip_reward import CLIPRewardCalculator
 
-calculator = CLIPRewardCalculator()
-reward = calculator.calculate_reward(image, "beautiful landscape")
+# CLIP 보상 계산기 초기화
+clip = CLIPRewardCalculator()
+
+# 보상 계산 (원본 user prompt 사용!)
+reward = clip.calculate_reward("a cat", generated_image)
+print(f"Reward: {reward:.4f}")  # 0.0~1.0 범위
+
+# 배치 처리
+rewards = clip.calculate_rewards_batch(user_prompts, images)
 ```
 
-## 설정 파일 ⚙️
+## 📊 품질 평가 시스템
 
-`config/default_config.json`에서 모든 설정을 관리할 수 있습니다:
+테스트 스크립트는 다음 기준으로 향상 품질을 평가합니다:
 
-```json
-{
-  "model_settings": {
-    "vlm_model": "microsoft/DialoGPT-medium",
-    "sd_model": "runwayml/stable-diffusion-v1-5",
-    "clip_model": "openai/clip-vit-base-patch32"
-  },
-  "training_settings": {
-    "learning_rate": 1e-5,
-    "group_size": 4,
-    "num_iterations": 50
-  }
-}
+1. **길이 증가** (1점): 더 상세한 설명
+2. **원본 키워드 포함** (1점): 원본 의도 유지
+3. **새로운 디테일 추가** (1점): 5개 이상의 새 단어
+4. **품질 키워드** (1점): 'high quality', 'detailed', '4k' 등
+5. **문장 구조** (1점): 5단어 이상의 의미있는 문장
+
+**총 5점 만점**으로 평가됩니다.
+
+## ⚙️ 설정 옵션
+
+```python
+qwen = QwenWrapper(
+    model_name="Qwen/Qwen2.5-7B-Instruct",  # 모델 이름
+    device="auto",                           # 디바이스 (auto/cuda/mps/cpu)
+    max_new_tokens=100,                      # 최대 생성 토큰
+    temperature=0.7                          # 생성 온도
+)
 ```
 
-## 데이터 형식 📊
+## 🎨 프롬프트 템플릿
 
-### 학습 데이터 (train_prompts.jsonl)
+시스템 프롬프트는 이미지 생성에 최적화되어 있습니다:
 
-```json
-{"user_prompt": "a cat", "category": "basic", "difficulty": "easy"}
-{"user_prompt": "sunset", "category": "basic", "difficulty": "easy"}
-{"user_prompt": "abstract art", "category": "creative", "difficulty": "hard"}
+- 원본 주제 유지
+- 예술적 스타일 및 조명 추가
+- 기술적 명세 포함 (해상도, 품질)
+- 간결하면서도 상세한 설명
+
+## 📈 다음 단계
+
+이 기본 시스템을 바탕으로 다음 기능들을 추가할 예정입니다:
+
+- [ ] Stable Diffusion 이미지 생성 연동
+- [ ] CLIP 기반 품질 평가
+- [ ] 강화학습 (GRPO) 통합
+- [ ] 웹 인터페이스 구축
+- [ ] 배치 처리 최적화
+
+## 🖥️ Multi-GPU 시스템
+
+### GPU 분배 전략
+
+- **GPU 1 (cuda:0)**: QWEN VL 모델 (정책 네트워크)
+- **GPU 2 (cuda:1)**: Stable Diffusion 3 (이미지 생성 환경)
+- **GPU 3 (cuda:2)**: CLIP 모델 (보상 계산)
+
+### 환경 변수 자동 설정
+
+```bash
+CUDA_VISIBLE_DEVICES=1,2,3
+PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+NCCL_DEBUG=INFO
 ```
-
-### 검증 데이터 (val_prompts.jsonl)
-
-```json
-{"user_prompt": "dog", "category": "basic", "difficulty": "easy"}
-{"user_prompt": "city skyline", "category": "photography", "difficulty": "medium"}
-```
-
-## 실험 추적 📈
-
-Wandb를 통한 실시간 실험 추적:
-
-- 학습 메트릭 (loss, reward, KL divergence)
-- 검증 결과 (성공률, 품질 점수)
-- 생성된 이미지 샘플
-- 하이퍼파라미터 추적
-
-## 출력 결과 📁
-
-학습 완료 후 `vlm_grpo_results/` 폴더에 생성되는 파일들:
-
-```
-vlm_grpo_results/
-├── best_model.pt              # 최고 성능 모델
-├── checkpoint_iter_10.pt      # 주기적 체크포인트
-├── final_results.json         # 최종 결과 요약
-├── validation_iter_5.json     # 검증 결과
-└── vlm_grpo_training.log      # 학습 로그
-```
-
-## 성능 최적화 🚀
-
-### Apple Silicon (MPS) 지원
-
-- 모든 모델이 Apple Silicon MPS를 자동 감지하고 활용
-- GPU 메모리 효율적 사용
 
 ### 메모리 최적화
 
-- Attention slicing
-- Gradient checkpointing
-- Mixed precision training
+- 각 GPU에 85% 메모리 한도 설정
+- 주기적 GPU 메모리 정리 (5 iteration마다)
+- 모델별 독립적 메모리 관리
 
-### 배치 처리
+## 🛠️ 기술 스택
 
-- 효율적인 배치 생성
-- 병렬 처리 지원
-
-## 주요 알고리즘 🧠
-
-### GRPO (Group Relative Policy Optimization)
-
-1. **그룹 데이터 수집**:
-
-   ```
-   프롬프트 배치 → VLM 개선 → SD3 생성 → CLIP 보상
-   ```
-
-2. **어드밴티지 계산**:
-
-   ```python
-   group_mean = np.mean(rewards)
-   advantages = rewards - group_mean  # 상대적 성능
-   ```
-
-3. **정책 업데이트**:
-   ```python
-   ratio = π_θ / π_ref  # 정책 비율
-   loss = -min(ratio * advantage, clipped_ratio * advantage)
-   ```
-
-## 모니터링 및 디버깅 🔍
-
-### 로깅 레벨
-
-- `DEBUG`: 상세한 디버깅 정보
-- `INFO`: 일반적인 진행 상황
-- `WARNING`: 경고 메시지
-- `ERROR`: 오류 발생
-
-### 주요 메트릭
-
-- **Policy Loss**: 정책 손실
-- **KL Divergence**: 참조 모델과의 차이
-- **Average Reward**: 평균 보상
-- **Success Rate**: 검증 성공률
-
-## 문제 해결 🛠️
-
-### 일반적인 문제들
-
-1. **메모리 부족**:
-
-   - 배치 크기 줄이기
-   - `memory_efficient=True` 설정
-
-2. **학습 불안정**:
-
-   - Learning rate 줄이기
-   - KL beta 조정
-
-3. **낮은 보상**:
-   - 보상 가중치 조정
-   - 프롬프트 품질 확인
-
-## 확장 가능성 🔮
-
-### 새로운 모델 추가
-
-- VLM: 다른 언어 모델로 교체 가능
-- SD: 다른 diffusion 모델 지원
-- CLIP: 다른 vision-language 모델 사용
-
-### 새로운 보상 함수
-
-- 미적 품질 평가
-- 안전성 검사
-- 스타일 일관성
-
-### 다중 모달 확장
-
-- 비디오 생성
-- 3D 모델 생성
-- 오디오 생성
-
-## 라이센스 📄
-
-이 프로젝트는 연구 및 교육 목적으로 제작되었습니다.
-
-## 기여하기 🤝
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests and documentation
-5. Submit a pull request
+- **Language Model**: Qwen2-VL-7B-Instruct (VL 모델)
+- **Image Generation**: Stable Diffusion 3 Medium
+- **Reward Model**: CLIP ViT-B/32
+- **Framework**: PyTorch + Transformers + Diffusers
+- **Multi-GPU**: 3 GPU 분산 처리
+- **Device Support**: CUDA Multi-GPU, Apple Silicon MPS, CPU
+- **Python**: 3.8+
 
 ---
 
-**Happy Training! 🎉**
-
-더 자세한 정보나 질문이 있으시면 이슈를 생성해 주세요.
+**Author**: AI Assistant  
+**Date**: 2025-01-22  
+**Status**: 기본 기능 구현 완료 ✅

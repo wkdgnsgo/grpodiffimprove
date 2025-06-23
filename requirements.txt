@@ -1,0 +1,11 @@
+torch>=2.0.0
+transformers>=4.40.0
+accelerate>=0.25.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+numpy>=1.24.0
+pillow>=9.5.0
+qwen-vl-utils
+torchvision>=0.15.0
+diffusers>=0.25.0
+matplotlib>=3.7.0 
