@@ -134,14 +134,18 @@ class GRPOTrainer:
         else:
             self.device = torch.device(config.device)
         
-        # 토크나이저 초기화
+                # 토크나이저 초기화
         self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
+        # vocab_size 안전하게 설정
+        self.vocab_size = len(self.tokenizer)
+        logger.info(f"📝 Tokenizer vocab size: {self.vocab_size}")
+            
         # 정책 네트워크 초기화
         self.policy_network = TokenPolicyNetwork(
-            vocab_size=len(self.tokenizer),
+            vocab_size=self.vocab_size,
             embed_dim=256,
             hidden_dim=512
         ).to(self.device)
@@ -210,11 +214,16 @@ class GRPOTrainer:
                     
                     # 다음 토큰 샘플링
                     next_token = policy_dist.sample()
+                    
+                    # 토큰 ID 범위 검증 및 클리핑
+                    next_token = torch.clamp(next_token, 0, self.vocab_size - 1)
+                    
                     log_prob = policy_dist.log_prob(next_token)
                     
-                    # 디버깅: 차원 확인
+                    # 디버깅: 차원 및 범위 확인
                     logger.debug(f"current_sequence shape: {current_sequence.shape}")
                     logger.debug(f"next_token shape: {next_token.shape}")
+                    logger.debug(f"next_token value: {next_token.item()}, vocab_size: {self.vocab_size}")
                     
                     # 데이터 저장
                     episode_states.append(current_state.squeeze())
@@ -328,7 +337,7 @@ class GRPOTrainer:
         
         # 2. 참조 모델 생성
         policy_ref = TokenPolicyNetwork(
-            vocab_size=len(self.tokenizer),
+            vocab_size=self.vocab_size,
             embed_dim=256,
             hidden_dim=512
         ).to(self.device)
