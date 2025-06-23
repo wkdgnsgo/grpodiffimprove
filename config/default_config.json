@@ -112,8 +112,8 @@
 
   "system_settings": {
     "_comment": "시스템 관련 설정",
-    "device": "auto",
-    "mixed_precision": true,
+    "device": "cpu",
+    "mixed_precision": false,
     "gradient_checkpointing": false,
     "memory_efficient": true
   },

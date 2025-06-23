@@ -95,9 +95,15 @@ class TokenPolicyNetwork(nn.Module):
         """
         batch_size, seq_len = input_ids.shape
         
+        # 입력 토큰 ID 범위 검증 및 클리핑
+        input_ids = torch.clamp(input_ids, 0, self.vocab_size - 1)
+        
+        # 위치 임베딩 범위 검증
+        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+        positions = torch.clamp(positions, 0, 99)  # position_embedding 최대 크기 99
+        
         # 토큰 + 위치 임베딩
         token_embeds = self.token_embedding(input_ids)
-        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
         pos_embeds = self.position_embedding(positions)
         
         # 임베딩 합성
@@ -196,6 +202,10 @@ class GRPOTrainer:
             
             # 1. 프롬프트 토크나이징
             initial_tokens = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+            
+            # 토큰 ID 범위 안전성 검증
+            initial_tokens = torch.clamp(initial_tokens, 0, self.vocab_size - 1)
+            logger.debug(f"Initial tokens: {initial_tokens}, max_token: {initial_tokens.max().item()}, vocab_size: {self.vocab_size}")
             
             # 2. 토큰별 순차 생성
             episode_states = []
