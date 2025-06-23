@@ -269,7 +269,7 @@ class VLMGRPOSystem:
                 self.wandb_logger = None
             else:
                 self.wandb_logger: WandbLogger = WandbLogger(
-                    project_name=self.config['wandb_settings']['project_name'],
+                    project=self.config['wandb_settings']['project_name'],
                     config=self.config
                 )
                 logger.info("✅ Wandb Logger initialized")
@@ -373,14 +373,14 @@ class VLMGRPOSystem:
                 
                 # --- 6. Wandb Logging ---
                 if self.wandb_logger is not None:
-                    self.wandb_logger.log_metrics({
+                    self.wandb_logger.log_training_metrics({
                         'iteration': iteration + 1,
-                        'avg_reward': iteration_metrics['avg_reward'],
+                        'average_reward': iteration_metrics['avg_reward'],
                         'policy_loss': iteration_metrics['policy_loss'],
                         'entropy': iteration_metrics['entropy'],
                         'kl_divergence': iteration_metrics['kl_div'],
                         'iteration_time': iteration_time,
-                        'best_reward': self.training_stats['best_reward']
+                        'total_time': self.training_stats['total_time']
                     })
                 
                 # --- 7. Validation ---
@@ -420,14 +420,23 @@ class VLMGRPOSystem:
                 logger.warning("⚠️ Validator not available, skipping validation")
                 return
             
-            val_results = self.validator.evaluate()
-            logger.info(f"✅ Validation complete - Score: {val_results.get('avg_score', 0.0):.4f}")
+            # 검증 데이터 준비
+            if self.data_loader is not None:
+                val_data = self.data_loader.get_validation_batch(batch_size=5)  # 작은 배치로 검증
+                val_data = [{"user_prompt": prompt} for prompt in val_data]
+            else:
+                # 기본 검증 데이터
+                val_data = [
+                    {"user_prompt": "a beautiful landscape"},
+                    {"user_prompt": "a cute animal"},
+                    {"user_prompt": "abstract art"}
+                ]
+            
+            val_results = self.validator.evaluate_batch(val_data, save_images=False, iteration=iteration)
+            logger.info(f"✅ Validation complete - Success Rate: {val_results.get('success_rate', 0.0):.2%}")
             
             if self.wandb_logger is not None:
-                self.wandb_logger.log_metrics({
-                    'val_score': val_results.get('avg_score', 0.0),
-                    'val_iteration': iteration
-                })
+                self.wandb_logger.log_validation_results(val_results)
                 
         except Exception as e:
             logger.error(f"❌ Validation failed: {e}")

@@ -409,9 +409,7 @@ class GRPOTrainer:
                         
                         # Reference policy
                         with torch.no_grad():
-                            ref_outputs = self.vlm_policy_ref(input_ids=state, return_dict=True)
-                            ref_logits = ref_outputs.logits[:, -1, :]
-                            ref_policy_dist = Categorical(logits=ref_logits)
+                            ref_policy_dist = self.vlm_policy_ref.forward(state)
                             ref_log_prob = ref_policy_dist.log_prob(action)
                         
                         current_log_probs.append(current_log_prob)

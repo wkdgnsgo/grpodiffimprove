@@ -32,18 +32,20 @@ class ValidationEvaluator:
     4. 상세한 분석 리포트 생성
     """
     
-    def __init__(self, vlm, sd_generator, clip_calculator):
+    def __init__(self, vlm_model, sd_generator, clip_calculator, config=None):
         """
         Validator 초기화
         
         Args:
-            vlm: VLM 모델
+            vlm_model: VLM 모델 (VLMWrapper 인스턴스)
             sd_generator: SD3 생성기
             clip_calculator: CLIP 보상 계산기
+            config: 설정 딕셔너리 (선택사항)
         """
-        self.vlm = vlm
+        self.vlm = vlm_model  # 호환성을 위해 vlm으로 저장
         self.sd_generator = sd_generator
         self.clip_calculator = clip_calculator
+        self.config = config or {}
         
         # 평가 통계
         self.evaluation_history = []
@@ -413,9 +415,9 @@ if __name__ == "__main__":
         
         # Validator 초기화
         validator = ValidationEvaluator(
-            MockVLM(),
-            MockSDGenerator(), 
-            MockCLIPCalculator()
+            vlm_model=MockVLM(),
+            sd_generator=MockSDGenerator(), 
+            clip_calculator=MockCLIPCalculator()
         )
         
         # 테스트 데이터
@@ -453,5 +455,5 @@ if __name__ == "__main__":
     
     print("\nUsage:")
     print("from evaluation.validator import ValidationEvaluator")
-    print("validator = ValidationEvaluator(vlm, sd_gen, clip_calc)")
+    print("validator = ValidationEvaluator(vlm_model=vlm, sd_generator=sd_gen, clip_calculator=clip_calc)")
     print("results = validator.evaluate_batch(validation_data)") 

@@ -96,12 +96,14 @@ def create_mock_components():
         """Mock VLM Policy Network"""
         def __init__(self):
             # --- Policy Network Initialization ---
+            # Embedding layer to handle token IDs properly
+            self.embedding = nn.Embedding(50000, 128)
             self.model = nn.Sequential(
-                nn.Linear(100, 512),
+                nn.Linear(128, 512),
                 nn.ReLU(),
                 nn.Linear(512, 256),
                 nn.ReLU(),
-                nn.Linear(256, 1000)
+                nn.Linear(256, 50000)
             )
             self.tokenizer = type('MockTokenizer', (), {
                 '__len__': lambda self: 50000,
@@ -111,9 +113,11 @@ def create_mock_components():
             
         def forward(self, input_ids, attention_mask=None):
             """Policy Network Forward Pass"""
-            batch_size = input_ids.size(0)
-            dummy_features = torch.randn(batch_size, 100)
-            logits = self.model(dummy_features)
+            # Properly handle token IDs through embedding
+            embedded = self.embedding(input_ids)  # [batch_size, seq_len, embed_dim]
+            # Use mean pooling to get fixed-size representation
+            pooled = embedded.mean(dim=1)  # [batch_size, embed_dim]
+            logits = self.model(pooled)  # [batch_size, vocab_size]
             return Categorical(logits=logits)
             
         def generate_sequence(self, prompt, max_new_tokens=5):
@@ -126,16 +130,16 @@ def create_mock_components():
             seq_len = 10
             
             for i in range(max_new_tokens):
-                # State (input sequence)
-                state = torch.randint(0, 1000, (seq_len,))
+                # State (input sequence) - ensure proper dtype
+                state = torch.randint(0, 1000, (seq_len,), dtype=torch.long)
                 states.append(state)
                 
                 # Action (next token)
-                action = torch.randint(0, 1000, ())
+                action = torch.randint(0, 1000, (), dtype=torch.long)
                 actions.append(action)
                 
                 # Log probability
-                log_prob = torch.randn(()) * 0.1
+                log_prob = torch.randn((), dtype=torch.float32) * 0.1
                 log_probs.append(log_prob)
                 
                 # Early stopping
