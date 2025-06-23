@@ -155,56 +155,113 @@ class GRPOTrainer:
         self._update_reference_model()
         
         # 각 프롬프트에 대해 데이터 수집
-        for prompt in prompts:
+        for i, prompt in enumerate(prompts):
             try:
+                logger.debug(f"📝 Processing prompt {i+1}/{len(prompts)}: {prompt[:50]}...")
+                
                 # 1. VLM으로 프롬프트 개선
                 enhanced_prompt, log_prob = self._enhance_prompt_with_logprob(prompt)
+                logger.debug(f"✅ Enhanced prompt {i}: {enhanced_prompt[:50]}...")
+                logger.debug(f"✅ Log prob {i}: {log_prob}")
                 
                 # 2. 참조 모델로 로그 확률 계산
                 ref_log_prob = self._calculate_reference_logprob(prompt, enhanced_prompt)
+                logger.debug(f"✅ Ref log prob {i}: {ref_log_prob}")
                 
                 # 3. 이미지 생성 (실제 구현에서는 SD3 사용)
                 image = self._generate_image(enhanced_prompt)
                 
                 # 4. 보상 계산 (실제 구현에서는 CLIP 사용)
                 reward = self._calculate_reward(image, enhanced_prompt, prompt)
+                logger.debug(f"✅ Reward {i}: {reward}")
                 
-                # 데이터 저장
+                # 데이터 저장 - 확실하게 저장
                 group_data['enhanced_prompts'].append(enhanced_prompt)
                 group_data['images'].append(image)
-                group_data['rewards'].append(reward)
+                group_data['rewards'].append(float(reward))
                 group_data['log_probs'].append(log_prob)
                 group_data['ref_log_probs'].append(ref_log_prob)
                 
+                logger.debug(f"✅ Sample {i} processed and stored successfully")
+                
             except Exception as e:
-                logger.warning(f"⚠️ Failed to process prompt '{prompt}': {e}")
+                logger.warning(f"⚠️ Failed to process prompt {i} '{prompt[:30]}...': {e}")
                 # 실패한 경우 기본값 사용 (일관된 텐서 속성으로)
                 group_data['enhanced_prompts'].append(prompt)
                 group_data['images'].append(None)
                 group_data['rewards'].append(0.0)
                 group_data['log_probs'].append(torch.tensor(-2.0, dtype=torch.float32, requires_grad=True))
                 group_data['ref_log_probs'].append(torch.tensor(-2.0, dtype=torch.float32))
+                logger.debug(f"⚠️ Sample {i} used default values")
+        
+        # 중간 검증: 데이터 수집 완료 확인
+        expected_length = len(prompts)
+        logger.info(f"📊 Data collection summary:")
+        logger.info(f"  - Expected samples: {expected_length}")
+        logger.info(f"  - Enhanced prompts: {len(group_data['enhanced_prompts'])}")
+        logger.info(f"  - Rewards: {len(group_data['rewards'])}")
+        logger.info(f"  - Log probs: {len(group_data['log_probs'])}")
+        logger.info(f"  - Ref log probs: {len(group_data['ref_log_probs'])}")
+        
+        # 데이터 일관성 검증 및 보정
+        for key in ['enhanced_prompts', 'images', 'rewards', 'log_probs', 'ref_log_probs']:
+            current_length = len(group_data[key])
+            if current_length < expected_length:
+                logger.warning(f"⚠️ {key} length ({current_length}) < expected ({expected_length}), padding...")
+                for j in range(current_length, expected_length):
+                    if key == 'enhanced_prompts':
+                        group_data[key].append(prompts[j] if j < len(prompts) else "default prompt")
+                    elif key == 'images':
+                        group_data[key].append(None)
+                    elif key == 'rewards':
+                        group_data[key].append(0.0)
+                    elif key == 'log_probs':
+                        group_data[key].append(torch.tensor(-2.0, dtype=torch.float32, requires_grad=True))
+                    elif key == 'ref_log_probs':
+                        group_data[key].append(torch.tensor(-2.0, dtype=torch.float32))
+                logger.info(f"✅ {key} padded to length {len(group_data[key])}")
         
         # 5. 어드밴티지 및 리턴 계산
         self._calculate_advantages_and_returns(group_data)
         
-        # 6. 데이터 완성도 최종 검증
-        logger.debug(f"📊 Final group data lengths:")
+        # 6. 최종 데이터 검증 (advantages와 returns 계산 후)
+        logger.info(f"📊 Final data verification:")
+        expected_length = len(prompts)
+        
         for key, value in group_data.items():
-            logger.debug(f"  - {key}: {len(value) if isinstance(value, list) else 'N/A'}")
+            if isinstance(value, list):
+                actual_length = len(value)
+                logger.info(f"  - {key}: {actual_length} items")
+                if actual_length != expected_length:
+                    logger.error(f"❌ {key} length mismatch: {actual_length} != {expected_length}")
+                else:
+                    logger.debug(f"✅ {key} length verified")
+            else:
+                logger.info(f"  - {key}: {type(value)}")
         
-        # 7. ref_log_probs와 advantages 존재 확인
-        if 'ref_log_probs' in group_data and len(group_data['ref_log_probs']) > 0:
-            logger.debug(f"✅ ref_log_probs available: {len(group_data['ref_log_probs'])} items")
+        # 7. 필수 데이터 최종 확인
+        ref_log_probs_ok = ('ref_log_probs' in group_data and 
+                           len(group_data['ref_log_probs']) == expected_length)
+        advantages_ok = ('advantages' in group_data and 
+                        len(group_data['advantages']) == expected_length)
+        
+        if ref_log_probs_ok:
+            logger.info(f"✅ ref_log_probs COMPLETE: {len(group_data['ref_log_probs'])} items")
         else:
-            logger.warning(f"⚠️ ref_log_probs missing or empty")
+            logger.error(f"❌ ref_log_probs INCOMPLETE: {len(group_data.get('ref_log_probs', []))} items")
             
-        if 'advantages' in group_data and len(group_data['advantages']) > 0:
-            logger.debug(f"✅ advantages available: {len(group_data['advantages'])} items")
+        if advantages_ok:
+            logger.info(f"✅ advantages COMPLETE: {len(group_data['advantages'])} items")
         else:
-            logger.warning(f"⚠️ advantages missing or empty")
+            logger.error(f"❌ advantages INCOMPLETE: {len(group_data.get('advantages', []))} items")
         
-        logger.debug(f"✅ Group data collected: avg_reward={np.mean(group_data['rewards']):.4f}")
+        # 8. 보상 통계
+        if group_data.get('rewards'):
+            avg_reward = np.mean(group_data['rewards'])
+            logger.info(f"📊 Group data collection COMPLETED: avg_reward={avg_reward:.4f}")
+        else:
+            logger.warning("⚠️ No rewards calculated")
+        
         return group_data
     
     def _enhance_prompt_with_logprob(self, prompt: str) -> Tuple[str, torch.Tensor]:
@@ -298,45 +355,99 @@ class GRPOTrainer:
         Args:
             group_data (Dict[str, Any]): 그룹 데이터 (in-place 수정)
         """
+        logger.debug("🔄 Starting advantages and returns calculation...")
+        
         # 데이터 완성도 검증
         expected_length = len(group_data['prompts'])
+        logger.debug(f"📊 Expected length: {expected_length}")
         
         # rewards 길이 검증 및 보정
-        if len(group_data['rewards']) != expected_length:
-            logger.warning(f"⚠️ Rewards length mismatch: {len(group_data['rewards'])} != {expected_length}")
+        current_rewards_length = len(group_data['rewards'])
+        logger.debug(f"📊 Current rewards length: {current_rewards_length}")
+        
+        if current_rewards_length != expected_length:
+            logger.warning(f"⚠️ Rewards length mismatch: {current_rewards_length} != {expected_length}")
             while len(group_data['rewards']) < expected_length:
                 group_data['rewards'].append(0.0)
+                logger.debug(f"⚠️ Added default reward, new length: {len(group_data['rewards'])}")
         
         # ref_log_probs 길이 검증 및 보정
-        if len(group_data['ref_log_probs']) != expected_length:
-            logger.warning(f"⚠️ ref_log_probs length mismatch: {len(group_data['ref_log_probs'])} != {expected_length}")
+        current_ref_length = len(group_data['ref_log_probs'])
+        logger.debug(f"📊 Current ref_log_probs length: {current_ref_length}")
+        
+        if current_ref_length != expected_length:
+            logger.warning(f"⚠️ ref_log_probs length mismatch: {current_ref_length} != {expected_length}")
             while len(group_data['ref_log_probs']) < expected_length:
                 group_data['ref_log_probs'].append(torch.tensor(-1.2, dtype=torch.float32))
+                logger.debug(f"⚠️ Added default ref_log_prob, new length: {len(group_data['ref_log_probs'])}")
         
-        rewards = np.array(group_data['rewards'])
+        # 보상 배열 생성
+        rewards = np.array(group_data['rewards'], dtype=np.float32)
+        logger.debug(f"📊 Rewards array: {rewards}")
         
         # 1. 할인된 리턴 계산 (단순화: 단일 스텝)
         returns = rewards.copy()
+        logger.debug(f"📊 Returns: {returns}")
         
         # 2. 그룹 기반 어드밴티지 계산
         # GRPO의 핵심: 그룹 평균 대비 상대적 성능
         group_mean_reward = np.mean(rewards)
         advantages = rewards - group_mean_reward
+        logger.debug(f"📊 Group mean reward: {group_mean_reward:.4f}")
+        logger.debug(f"📊 Raw advantages: {advantages}")
         
         # 3. 어드밴티지 정규화 (학습 안정성 향상)
         if len(advantages) > 1:
-            advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
+            advantage_std = np.std(advantages)
+            if advantage_std > 1e-8:
+                advantages = (advantages - np.mean(advantages)) / advantage_std
+                logger.debug(f"📊 Normalized advantages: {advantages}")
+            else:
+                logger.debug("📊 Advantage std too small, skipping normalization")
         
-        # 4. 텐서로 변환 (디바이스 문제 해결)
-        group_data['returns'] = [torch.tensor(float(r), dtype=torch.float32) for r in returns]
-        group_data['advantages'] = [torch.tensor(float(a), dtype=torch.float32) for a in advantages]
+        # 4. 확실하게 리스트로 변환 및 검증
+        returns_list = []
+        advantages_list = []
         
-        # 5. 최종 길이 검증
-        for key in ['returns', 'advantages']:
-            if len(group_data[key]) != expected_length:
-                logger.error(f"❌ Final length mismatch for {key}: {len(group_data[key])} != {expected_length}")
+        for i in range(expected_length):
+            if i < len(returns):
+                ret_val = float(returns[i])
+            else:
+                ret_val = 0.0
+                logger.warning(f"⚠️ Missing return for index {i}, using default 0.0")
+            
+            if i < len(advantages):
+                adv_val = float(advantages[i])
+            else:
+                adv_val = 0.0
+                logger.warning(f"⚠️ Missing advantage for index {i}, using default 0.0")
+                
+            returns_list.append(torch.tensor(ret_val, dtype=torch.float32))
+            advantages_list.append(torch.tensor(adv_val, dtype=torch.float32))
         
-        logger.debug(f"📊 Advantages calculated: mean={np.mean(advantages):.4f}, std={np.std(advantages):.4f}")
+        # 5. 그룹 데이터에 확실하게 할당
+        group_data['returns'] = returns_list
+        group_data['advantages'] = advantages_list
+        
+        # 6. 최종 검증
+        final_returns_length = len(group_data['returns'])
+        final_advantages_length = len(group_data['advantages'])
+        
+        logger.info(f"✅ Returns calculated: {final_returns_length} items")
+        logger.info(f"✅ Advantages calculated: {final_advantages_length} items")
+        
+        if final_returns_length != expected_length:
+            logger.error(f"❌ Final returns length mismatch: {final_returns_length} != {expected_length}")
+        else:
+            logger.debug("✅ Returns length verified")
+            
+        if final_advantages_length != expected_length:
+            logger.error(f"❌ Final advantages length mismatch: {final_advantages_length} != {expected_length}")
+        else:
+            logger.debug("✅ Advantages length verified")
+        
+        logger.info(f"📊 Advantages calculated: mean={np.mean(advantages):.4f}, std={np.std(advantages):.4f}")
+        logger.debug("✅ Advantages and returns calculation completed!")
     
     def _update_reference_model(self):
         """
