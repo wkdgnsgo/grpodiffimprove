@@ -16,7 +16,7 @@ Date: 2025-01-22
 
 import torch
 import torch.nn as nn
-from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
 from typing import List, Dict, Optional, Union
 import logging
 import json
@@ -109,11 +109,14 @@ class VLMWrapper(nn.Module):
         5. 토큰 ID 설정
         """
         try:
-            logger.info(f"📥 Loading Qwen2.5-VL model: {self.model_name}")
+            logger.info(f"📥 Loading Qwen2.5 model: {self.model_name}")
+            
+            # Dimension mismatch를 피하기 위해 base 모델 사용
+            base_model_name = "Qwen/Qwen2.5-7B-Instruct"
             
             # 토크나이저 로드
             self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
+                base_model_name,
                 trust_remote_code=True,
                 padding_side="left"
             )
@@ -124,16 +127,12 @@ class VLMWrapper(nn.Module):
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
                 logger.info("🔧 Set pad_token to eos_token")
             
-            # 프로세서 로드 (use_fast=True로 설정하여 warning 제거)
-            self.processor = AutoProcessor.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-                use_fast=True
-            )
+            # 프로세서 설정 (base 모델에서는 None)
+            self.processor = None
             
             # 모델 로드 (분산 학습 관련 설정 비활성화)
-            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-                self.model_name,
+            self.model = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
                 trust_remote_code=True,
                 torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32,
                 device_map=None,  # 분산 학습 비활성화
@@ -152,10 +151,10 @@ class VLMWrapper(nn.Module):
             self.generation_config['pad_token_id'] = self.tokenizer.pad_token_id
             self.generation_config['eos_token_id'] = self.tokenizer.eos_token_id
             
-            logger.info(f"✅ Qwen2.5-VL model loaded successfully on {self.device}")
+            logger.info(f"✅ Qwen2.5 model loaded successfully on {self.device}")
             
         except Exception as e:
-            logger.error(f"❌ Failed to load Qwen2.5-VL model: {e}")
+            logger.error(f"❌ Failed to load Qwen2.5 model: {e}")
             logger.info("🔄 Trying fallback loading method...")
             
             # 대안 로딩 방식 (일반 AutoTokenizer 사용)
@@ -172,7 +171,6 @@ class VLMWrapper(nn.Module):
                     logger.info("🔧 Set pad_token to eos_token for fallback model")
                 
                 # 간단한 텍스트 생성 모델로 대체
-                from transformers import AutoModelForCausalLM
                 self.model = AutoModelForCausalLM.from_pretrained(
                     "Qwen/Qwen2.5-7B-Instruct",
                     trust_remote_code=True,
@@ -196,7 +194,7 @@ class VLMWrapper(nn.Module):
                 
             except Exception as e2:
                 logger.error(f"❌ Fallback loading also failed: {e2}")
-                raise RuntimeError(f"Qwen2.5-VL model loading failed: {e} | Fallback: {e2}")
+                raise RuntimeError(f"Qwen2.5 model loading failed: {e} | Fallback: {e2}")
     
     def enhance_prompt(self, user_prompt: str) -> str:
         """

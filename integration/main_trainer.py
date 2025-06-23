@@ -114,10 +114,9 @@ class VLMGRPOSystem:
         
         # 학습 상태
         self.training_stats = {
-            'iteration': 0,
-            'total_time': 0,
-            'best_reward': -float('inf'),
-            'best_model_path': None
+            'best_reward': float('-inf'),
+            'total_iterations': 0,
+            'total_time': 0.0
         }
         
         logger.info("🚀 VLM GRPO System initialized")
@@ -248,19 +247,26 @@ class VLMGRPOSystem:
             )
             
             # 8. Wandb Logger 초기화 (선택적)
-            if self.config.get("use_wandb", False):
+            if self.config.get("wandb_settings", {}).get("use_wandb", False):
                 logger.info("📈 Initializing Wandb Logger...")
                 if WandbLogger is None:
                     logger.warning("⚠️ WandbLogger not available, skipping wandb initialization")
                 else:
                     self.wandb_logger = WandbLogger(
-                        project=self.config.get("wandb_project", "vlm-grpo"),
-                        entity=self.config.get("wandb_entity", None),
+                        project=self.config.get("wandb_settings", {}).get("project", "vlm-grpo"),
+                        entity=self.config.get("wandb_settings", {}).get("entity", None),
                         config=self.config
                     )
             
             # 출력 디렉토리 생성
-            os.makedirs(self.config["output_dir"], exist_ok=True)
+            os.makedirs(self.config["output_settings"]["output_dir"], exist_ok=True)
+            
+            # 학습 통계 초기화
+            self.training_stats = {
+                'best_reward': float('-inf'),
+                'total_iterations': 0,
+                'total_time': 0.0
+            }
             
             logger.info("✅ All components initialized successfully")
             
@@ -281,17 +287,21 @@ class VLMGRPOSystem:
         6. 주기적 검증 및 저장
         """
         logger.info("🚀 Starting VLM GRPO training...")
-        start_time = time.time()
+        self.start_time = time.time()
         
         try:
-            for iteration in range(self.config["num_iterations"]):
+            for iteration in range(self.config["training_settings"]["num_iterations"]):
                 iteration_start = time.time()
                 
-                logger.info(f"🔄 Iteration {iteration + 1}/{self.config['num_iterations']}")
+                logger.info(f"🔄 Iteration {iteration + 1}/{self.config['training_settings']['num_iterations']}")
                 
                 # 1. 학습 배치 생성
+                if self.data_loader is None:
+                    logger.error("❌ Data loader not initialized")
+                    break
+                    
                 batch_prompts = self.data_loader.get_training_batch(
-                    batch_size=self.config["group_size"]
+                    batch_size=self.config["training_settings"]["group_size"]
                 )
                 
                 if not batch_prompts:
@@ -302,6 +312,10 @@ class VLMGRPOSystem:
                 group_data = self._collect_training_data(batch_prompts)
                 
                 # 3. GRPO 업데이트
+                if self.grpo_trainer is None:
+                    logger.error("❌ GRPO trainer not initialized")
+                    break
+                    
                 training_metrics = self.grpo_trainer.grpo_update(group_data)
                 
                 # 4. 메트릭 로깅
@@ -309,11 +323,11 @@ class VLMGRPOSystem:
                 self._log_training_metrics(iteration + 1, training_metrics, iteration_time)
                 
                 # 5. 주기적 검증
-                if (iteration + 1) % self.config["validation_interval"] == 0:
+                if (iteration + 1) % self.config["training_settings"]["validation_interval"] == 0:
                     self._run_validation(iteration + 1)
                 
                 # 6. 체크포인트 저장
-                if (iteration + 1) % self.config["checkpoint_interval"] == 0:
+                if (iteration + 1) % self.config["training_settings"]["checkpoint_interval"] == 0:
                     self._save_checkpoint(iteration + 1)
                 
                 # 7. 최고 성능 모델 저장
@@ -323,7 +337,7 @@ class VLMGRPOSystem:
                     self._save_best_model(iteration + 1)
             
             # 학습 완료
-            total_time = time.time() - start_time
+            total_time = time.time() - self.start_time
             self.training_stats['total_time'] = total_time
             
             logger.info(f"✅ Training completed! Total time: {total_time:.2f}s")
@@ -334,7 +348,7 @@ class VLMGRPOSystem:
             raise
         finally:
             # Wandb 세션 종료
-            if self.wandb_logger:
+            if hasattr(self, 'wandb_logger') and self.wandb_logger:
                 self.wandb_logger.finish()
     
     def _collect_training_data(self, prompts: List[str]) -> Dict[str, Any]:
@@ -360,15 +374,27 @@ class VLMGRPOSystem:
         for prompt in prompts:
             try:
                 # 1. VLM으로 프롬프트 개선
-                enhanced_prompt = self.vlm.enhance_prompt(prompt)
+                if self.vlm is None:
+                    logger.warning("⚠️ VLM not initialized, using original prompt")
+                    enhanced_prompt = prompt
+                else:
+                    enhanced_prompt = self.vlm.enhance_prompt(prompt)
                 
                 # 2. SD3로 이미지 생성
-                image = self.sd_generator.generate_image(enhanced_prompt)
+                if self.sd_generator is None:
+                    logger.warning("⚠️ SD generator not initialized, skipping image generation")
+                    image = None
+                else:
+                    image = self.sd_generator.generate_image(enhanced_prompt)
                 
                 # 3. 종합적 보상 계산
-                rewards = self.multi_reward_calculator.calculate_comprehensive_reward(
-                    image, prompt, enhanced_prompt
-                )
+                if self.multi_reward_calculator is None:
+                    logger.warning("⚠️ Multi reward calculator not initialized, using default reward")
+                    rewards = {'final_reward': 0.0}
+                else:
+                    rewards = self.multi_reward_calculator.calculate_comprehensive_reward(
+                        image, prompt, enhanced_prompt
+                    )
                 
                 # 데이터 저장
                 group_data['enhanced_prompts'].append(enhanced_prompt)
@@ -429,6 +455,10 @@ class VLMGRPOSystem:
         
         try:
             # 검증 데이터 가져오기
+            if self.data_loader is None:
+                logger.warning("⚠️ Data loader not initialized, skipping validation")
+                return
+                
             val_data = self.data_loader.get_validation_data()
             
             if not val_data:
@@ -436,52 +466,73 @@ class VLMGRPOSystem:
                 return
             
             # 검증 실행
+            if self.validator is None:
+                logger.warning("⚠️ Validator not initialized, skipping validation")
+                return
+                
             val_results = self.validator.evaluate_batch(val_data[:10])  # 처음 10개만
             
             # 결과 로깅
-            logger.info(f"✅ Validation results:")
-            logger.info(f"  - Success Rate: {val_results.get('success_rate', 0):.2%}")
-            logger.info(f"  - Average CLIP Score: {val_results.get('avg_clip_score', 0):.4f}")
-            logger.info(f"  - Quality Score: {val_results.get('quality_score', 0):.4f}")
+            logger.info(f"📊 Validation Results (Iteration {iteration}):")
+            for metric, value in val_results.items():
+                logger.info(f"  - {metric}: {value:.4f}")
             
             # Wandb 로깅
-            if self.wandb_logger:
+            if hasattr(self, 'wandb_logger') and self.wandb_logger:
+                wandb_val_metrics = {f'val_{k}': v for k, v in val_results.items()}
+                wandb_val_metrics['iteration'] = iteration
                 self.wandb_logger.log_validation_results(val_results)
-            
-            # 검증 결과 저장
-            val_save_path = f"{self.config['output_dir']}/validation_iter_{iteration}.json"
-            with open(val_save_path, 'w', encoding='utf-8') as f:
-                json.dump(val_results, f, indent=2, ensure_ascii=False)
-            
+                
         except Exception as e:
             logger.error(f"❌ Validation failed: {e}")
     
     def _save_checkpoint(self, iteration: int):
         """체크포인트 저장"""
-        checkpoint_path = f"{self.config['output_dir']}/checkpoint_iter_{iteration}.pt"
-        self.grpo_trainer.save_checkpoint(checkpoint_path)
-        logger.info(f"💾 Checkpoint saved: {checkpoint_path}")
+        if self.grpo_trainer is None:
+            logger.warning("⚠️ GRPO trainer not initialized, skipping checkpoint save")
+            return
+            
+        try:
+            checkpoint_path = f"{self.config['output_settings']['output_dir']}/checkpoint_iter_{iteration}.pt"
+            self.grpo_trainer.save_checkpoint(checkpoint_path)
+            logger.info(f"💾 Checkpoint saved: {checkpoint_path}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save checkpoint: {e}")
     
     def _save_best_model(self, iteration: int):
         """최고 성능 모델 저장"""
-        best_model_path = f"{self.config['output_dir']}/best_model.pt"
-        self.grpo_trainer.save_checkpoint(best_model_path)
-        self.training_stats['best_model_path'] = best_model_path
-        logger.info(f"🏆 Best model saved: {best_model_path} (iteration {iteration})")
+        if self.grpo_trainer is None:
+            logger.warning("⚠️ GRPO trainer not initialized, skipping best model save")
+            return
+            
+        try:
+            best_model_path = f"{self.config['output_settings']['output_dir']}/best_model.pt"
+            self.grpo_trainer.save_checkpoint(best_model_path)
+            logger.info(f"🏆 Best model saved: {best_model_path}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save best model: {e}")
     
     def _save_final_results(self):
         """최종 결과 저장"""
-        results = {
-            'config': self.config,
-            'training_stats': self.training_stats,
-            'final_metrics': self.grpo_trainer.get_training_stats()
-        }
-        
-        results_path = f"{self.config['output_dir']}/final_results.json"
-        with open(results_path, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"📋 Final results saved: {results_path}")
+        try:
+            results_path = f"{self.config['output_settings']['output_dir']}/final_results.json"
+            
+            # 학습 통계 수집
+            final_stats = self.training_stats.copy()
+            
+            # GRPO 통계 추가 (있다면)
+            if self.grpo_trainer is not None and hasattr(self.grpo_trainer, 'get_training_stats'):
+                grpo_stats = self.grpo_trainer.get_training_stats()
+                final_stats.update(grpo_stats)
+            
+            # 결과 저장
+            with open(results_path, 'w', encoding='utf-8') as f:
+                json.dump(final_stats, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"📋 Final results saved: {results_path}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to save final results: {e}")
 
 
 def main():

@@ -209,3 +209,9 @@ installation page: https://pytorch.org/get-started/locally/ and follow the ones 
 Please note that you may need to restart your runtime after installation.
 
 2025-06-23 16:32:57,477 - models.vlm_wrapper - INFO - 🔄 Trying fallback loading method...
+2025-06-23 16:44:44,162 - integration.main_trainer - INFO - 🚀 VLM GRPO System initialized
+2025-06-23 16:44:44,163 - integration.main_trainer - INFO - 🔧 Initializing components...
+2025-06-23 16:44:44,163 - integration.main_trainer - INFO - 📝 Initializing VLM...
+2025-06-23 16:44:44,163 - models.vlm_wrapper - INFO - 📄 Loaded model name from config: Qwen/Qwen2.5-VL-7B-Instruct
+2025-06-23 16:44:44,163 - models.vlm_wrapper - INFO - 🍎 Using Apple Silicon MPS for Qwen2.5-VL
+2025-06-23 16:44:44,163 - models.vlm_wrapper - INFO - 📥 Loading Qwen2.5 model: Qwen/Qwen2.5-VL-7B-Instruct
