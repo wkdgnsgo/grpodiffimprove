@@ -124,23 +124,26 @@ class VLMWrapper(nn.Module):
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
                 logger.info("🔧 Set pad_token to eos_token")
             
-            # 프로세서 로드
+            # 프로세서 로드 (use_fast=True로 설정하여 warning 제거)
             self.processor = AutoProcessor.from_pretrained(
                 self.model_name,
-                trust_remote_code=True
+                trust_remote_code=True,
+                use_fast=True
             )
             
-            # 모델 로드
+            # 모델 로드 (분산 학습 관련 설정 비활성화)
             self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.model_name,
                 trust_remote_code=True,
                 torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32,
-                device_map="auto" if self.device.type == 'cuda' else None
+                device_map=None,  # 분산 학습 비활성화
+                attn_implementation="eager",  # SDPA 대신 eager attention 사용
+                use_cache=True,
+                low_cpu_mem_usage=True
             )
             
-            # 디바이스로 이동 (device_map이 없는 경우)
-            if self.device.type != 'cuda':
-                self.model = self.model.to(self.device)
+            # 디바이스로 이동
+            self.model = self.model.to(self.device)
             
             # 평가 모드 설정
             self.model.eval()
@@ -173,7 +176,11 @@ class VLMWrapper(nn.Module):
                 self.model = AutoModelForCausalLM.from_pretrained(
                     "Qwen/Qwen2.5-7B-Instruct",
                     trust_remote_code=True,
-                    torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32
+                    torch_dtype=torch.float16 if self.device.type in ['cuda', 'mps'] else torch.float32,
+                    device_map=None,  # 분산 학습 비활성화
+                    attn_implementation="eager",  # SDPA 대신 eager attention 사용
+                    use_cache=True,
+                    low_cpu_mem_usage=True
                 )
                 
                 self.model = self.model.to(self.device)

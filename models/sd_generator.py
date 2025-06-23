@@ -117,12 +117,22 @@ class SD3Generator:
             # SD3 모델인지 확인하여 적절한 로딩 방식 선택
             if "stable-diffusion-3" in self.model_name.lower():
                 # SD3 전용 로딩 방식
-                self.pipeline = StableDiffusion3Pipeline.from_pretrained(
-                    self.model_name,
-                    torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
-                    text_encoder_3=None,  # T5 텍스트 인코더 비활성화 (메모리 절약)
-                    transformer=None,  # 필요시 커스텀 트랜스포머 사용
-                )
+                try:
+                    self.pipeline = StableDiffusion3Pipeline.from_pretrained(
+                        self.model_name,
+                        torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
+                        use_safetensors=True,
+                        variant="fp16" if self.device in ['cuda', 'mps'] else None
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ SD3 specific loading failed: {e}, trying generic method")
+                    # SD3 전용 로딩 실패 시 일반 방식으로 시도
+                    self.pipeline = DiffusionPipeline.from_pretrained(
+                        self.model_name,
+                        torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
+                        use_safetensors=True,
+                        variant="fp16" if self.device in ['cuda', 'mps'] else None
+                    )
             else:
                 # 일반 SD 모델 로딩
                 self.pipeline = DiffusionPipeline.from_pretrained(
@@ -159,17 +169,63 @@ class SD3Generator:
             
             # 대안 로딩 방식
             try:
+                # 가장 기본적인 방식으로 로딩 시도
                 self.pipeline = DiffusionPipeline.from_pretrained(
                     self.model_name,
-                    torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
-                    use_safetensors=True,
+                    torch_dtype=torch.float32,  # float32로 강제 설정 (호환성)
+                    use_safetensors=False,  # safetensors 비활성화
                 )
                 self.pipeline = self.pipeline.to(self.device)
+                
+                # 안전 체크 비활성화
+                if hasattr(self.pipeline, 'safety_checker'):
+                    self.pipeline.safety_checker = None
+                if hasattr(self.pipeline, 'requires_safety_checker'):
+                    self.pipeline.requires_safety_checker = False
+                    
                 logger.info(f"✅ SD3 pipeline loaded with alternative method on {self.device}")
                 
             except Exception as e2:
                 logger.error(f"❌ Alternative loading also failed: {e2}")
-                raise RuntimeError(f"SD3 pipeline loading failed: {e} | Alternative: {e2}")
+                logger.warning("🔄 Using fallback SD model...")
+                
+                # 최종 대안: 더 안정적인 SD 모델 사용
+                try:
+                    fallback_model = "runwayml/stable-diffusion-v1-5"
+                    logger.info(f"📥 Loading fallback model: {fallback_model}")
+                    
+                    self.pipeline = DiffusionPipeline.from_pretrained(
+                        fallback_model,
+                        torch_dtype=torch.float16 if self.device in ['cuda', 'mps'] else torch.float32,
+                        use_safetensors=True,
+                        variant="fp16" if self.device in ['cuda', 'mps'] else None
+                    )
+                    self.pipeline = self.pipeline.to(self.device)
+                    
+                    # 안전 체크 비활성화
+                    if hasattr(self.pipeline, 'safety_checker'):
+                        self.pipeline.safety_checker = None
+                    if hasattr(self.pipeline, 'requires_safety_checker'):
+                        self.pipeline.requires_safety_checker = False
+                    
+                    # 설정을 SD1.5에 맞게 조정
+                    self.height = 512
+                    self.width = 512
+                    self.num_inference_steps = 20
+                    self.guidance_scale = 7.5
+                    
+                    self.generation_config.update({
+                        'height': self.height,
+                        'width': self.width,
+                        'num_inference_steps': self.num_inference_steps,
+                        'guidance_scale': self.guidance_scale,
+                    })
+                    
+                    logger.info(f"✅ Fallback SD model loaded successfully on {self.device}")
+                    
+                except Exception as e3:
+                    logger.error(f"❌ All loading methods failed: {e} | {e2} | {e3}")
+                    raise RuntimeError(f"SD pipeline loading failed completely: {e3}")
     
     def generate_image(self, 
                       prompt: str, 
