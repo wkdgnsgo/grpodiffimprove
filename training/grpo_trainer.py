@@ -532,11 +532,32 @@ class GRPOTrainer:
             Dict[str, float]: 에포크 메트릭
         """
         try:
-            # 입력 데이터 검증
-            logger.debug(f"🔍 Epoch update input validation:")
-            logger.debug(f"  - prompts: {len(group_data.get('prompts', []))}")
-            logger.debug(f"  - ref_log_probs: {len(group_data.get('ref_log_probs', []))}")
-            logger.debug(f"  - advantages: {len(group_data.get('advantages', []))}")
+            # 입력 데이터 사전 검증 및 보정
+            expected_length = len(group_data['prompts'])
+            logger.debug(f"🔍 Epoch update - Expected length: {expected_length}")
+            
+            # ref_log_probs 확실하게 검증 및 보정
+            if 'ref_log_probs' not in group_data:
+                logger.warning("⚠️ ref_log_probs key missing, creating...")
+                group_data['ref_log_probs'] = []
+            
+            while len(group_data['ref_log_probs']) < expected_length:
+                group_data['ref_log_probs'].append(torch.tensor(-1.2, dtype=torch.float32))
+                logger.debug(f"⚠️ Added missing ref_log_prob, current length: {len(group_data['ref_log_probs'])}")
+            
+            # advantages 확실하게 검증 및 보정
+            if 'advantages' not in group_data:
+                logger.warning("⚠️ advantages key missing, creating...")
+                group_data['advantages'] = []
+            
+            while len(group_data['advantages']) < expected_length:
+                group_data['advantages'].append(torch.tensor(0.0, dtype=torch.float32))
+                logger.debug(f"⚠️ Added missing advantage, current length: {len(group_data['advantages'])}")
+            
+            logger.info(f"✅ Pre-validation complete:")
+            logger.info(f"  - prompts: {len(group_data['prompts'])}")
+            logger.info(f"  - ref_log_probs: {len(group_data['ref_log_probs'])}")
+            logger.info(f"  - advantages: {len(group_data['advantages'])}")
             
             self.optimizer.zero_grad()
             
@@ -556,30 +577,20 @@ class GRPOTrainer:
             kl_div_estimates = []  # KL divergence estimates for batch average
             entropy = torch.tensor(0.0, dtype=torch.float32, requires_grad=True)
             
-            for i in range(len(group_data['prompts'])):
+            for i in range(expected_length):
                 try:
                     # 현재 로그 확률과 참조 로그 확률 가져오기
                     current_log_prob = current_log_probs[i]
                     
-                    # ref_log_probs 키 안전하게 접근
-                    if 'ref_log_probs' not in group_data or i >= len(group_data['ref_log_probs']):
-                        logger.warning(f"⚠️ Missing ref_log_probs for sample {i}")
-                        ref_log_prob = torch.tensor(-1.2, dtype=torch.float32)
-                    else:
-                        ref_log_prob = group_data['ref_log_probs'][i]
-                    
-                    # 텐서로 변환 (필요시)
+                    # ref_log_probs 안전하게 접근 (이미 보정됨)
+                    ref_log_prob = group_data['ref_log_probs'][i]
                     if not isinstance(ref_log_prob, torch.Tensor):
                         ref_log_prob = torch.tensor(float(ref_log_prob), dtype=torch.float32)
                     
-                    # advantages 키 안전하게 접근
-                    if 'advantages' not in group_data or i >= len(group_data['advantages']):
-                        logger.warning(f"⚠️ Missing advantages for sample {i}")
-                        advantage = torch.tensor(0.0, dtype=torch.float32)
-                    else:
-                        advantage = group_data['advantages'][i]
-                        if not isinstance(advantage, torch.Tensor):
-                            advantage = torch.tensor(float(advantage), dtype=torch.float32)
+                    # advantages 안전하게 접근 (이미 보정됨)
+                    advantage = group_data['advantages'][i]
+                    if not isinstance(advantage, torch.Tensor):
+                        advantage = torch.tensor(float(advantage), dtype=torch.float32)
                     
                     # 정책 비율 계산: π_θ(a|s) / π_ref(a|s)
                     log_ratio = current_log_prob - ref_log_prob

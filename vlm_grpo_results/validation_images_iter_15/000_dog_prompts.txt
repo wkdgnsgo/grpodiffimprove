@@ -1,0 +1,5 @@
+Original Prompt:
+dog
+
+Enhanced Prompt:
+dog, loyal, friendly, 8k resolution, sharp focus, depth of field

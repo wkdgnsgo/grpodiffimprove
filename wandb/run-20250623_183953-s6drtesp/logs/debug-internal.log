@@ -1,0 +1,7 @@
+{"time":"2025-06-23T18:39:53.925845+09:00","level":"INFO","msg":"stream: starting","core version":"0.20.1","symlink path":"/Users/mark/Desktop/git/grpodiffimprove/wandb/run-20250623_183953-s6drtesp/logs/debug-core.log"}
+{"time":"2025-06-23T18:39:54.254422+09:00","level":"INFO","msg":"stream: created new stream","id":"s6drtesp"}
+{"time":"2025-06-23T18:39:54.254485+09:00","level":"INFO","msg":"stream: started","id":"s6drtesp"}
+{"time":"2025-06-23T18:39:54.254505+09:00","level":"INFO","msg":"handler: started","stream_id":"s6drtesp"}
+{"time":"2025-06-23T18:39:54.254734+09:00","level":"INFO","msg":"sender: started","stream_id":"s6drtesp"}
+{"time":"2025-06-23T18:39:54.254862+09:00","level":"INFO","msg":"writer: Do: started","stream_id":"s6drtesp"}
+{"time":"2025-06-23T18:39:54.662618+09:00","level":"INFO","msg":"Starting system monitor"}

@@ -1,0 +1,5 @@
+Original Prompt:
+dog
+
+Enhanced Prompt:
+dog, loyal, friendly, well-lit, detailed, perfect composition
