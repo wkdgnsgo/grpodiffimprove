@@ -164,6 +164,10 @@ class SD3Generator:
             if hasattr(self.pipeline, 'requires_safety_checker'):
                 self.pipeline.requires_safety_checker = False
             
+            # Progress bar 비활성화
+            self.pipeline.set_progress_bar_config(disable=True)
+            logger.debug("🔇 Progress bar disabled for cleaner output")
+            
             logger.info(f"✅ SD3 pipeline loaded successfully on {self.device}")
             
         except Exception as e:
@@ -185,6 +189,10 @@ class SD3Generator:
                     self.pipeline.safety_checker = None
                 if hasattr(self.pipeline, 'requires_safety_checker'):
                     self.pipeline.requires_safety_checker = False
+                
+                # Progress bar 비활성화
+                self.pipeline.set_progress_bar_config(disable=True)
+                logger.debug("🔇 Progress bar disabled for alternative loading")
                     
                 logger.info(f"✅ SD3 pipeline loaded with alternative method on {self.device}")
                 
@@ -210,6 +218,10 @@ class SD3Generator:
                         self.pipeline.safety_checker = None
                     if hasattr(self.pipeline, 'requires_safety_checker'):
                         self.pipeline.requires_safety_checker = False
+                    
+                    # Progress bar 비활성화
+                    self.pipeline.set_progress_bar_config(disable=True)
+                    logger.debug("🔇 Progress bar disabled for fallback model")
                     
                     # 설정을 SD1.5에 맞게 조정
                     self.height = 512
