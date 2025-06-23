@@ -9,6 +9,7 @@ Qwen2.5-VL을 사용하여 사용자의 간단한 프롬프트를 상세하고 �
 2. 텍스트 생성 파라미터 관리
 3. 디바이스 최적화 (MPS/CUDA/CPU)
 4. 배치 처리 지원
+5. 토큰 길이 제한 (CLIP 77 토큰 제한)
 
 Author: AI Assistant
 Date: 2025-01-22
@@ -16,7 +17,7 @@ Date: 2025-01-22
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, CLIPTokenizer
 from typing import List, Dict, Optional, Union
 import logging
 import json
@@ -31,13 +32,17 @@ class VLMWrapper(nn.Module):
     더 상세하고 구체적인 프롬프트 (예: "a fluffy orange tabby cat sitting gracefully...")로 
     변환하는 기능을 제공합니다.
     
+    77토큰 제한을 준수하여 CLIP text encoder와 호환성을 보장합니다.
+    
     Attributes:
         model_name (str): 사용할 Qwen2.5-VL 모델 이름 (config에서 읽어옴)
         tokenizer: 토크나이저 객체
         processor: 프로세서 객체
         model: Qwen2.5-VL 모델 객체
+        clip_tokenizer: CLIP 토크나이저 (토큰 길이 체크용)
         device: 연산 디바이스 (MPS/CUDA/CPU)
         generation_config (dict): 텍스트 생성 설정
+        max_token_length (int): 최대 토큰 길이 (기본값: 77)
     """
     
     def __init__(self,
@@ -46,7 +51,8 @@ class VLMWrapper(nn.Module):
                  max_new_tokens: int = 100,
                  temperature: float = 0.7,
                  top_p: float = 0.9,
-                 do_sample: bool = True):
+                 do_sample: bool = True,
+                 max_token_length: int = 77):
         """
         VLM Wrapper 초기화 (간단한 플레이스홀더 방식)
         
@@ -57,6 +63,7 @@ class VLMWrapper(nn.Module):
             temperature (float): 생성 온도 (사용되지 않음)
             top_p (float): 누적 확률 임계값 (사용되지 않음)
             do_sample (bool): 샘플링 여부 (사용되지 않음)
+            max_token_length (int): 최대 토큰 길이 (CLIP 제한)
         """
         super().__init__()
         
@@ -76,6 +83,17 @@ class VLMWrapper(nn.Module):
         self.tokenizer = None
         self.processor = None
         
+        # CLIP 토크나이저 초기화 (토큰 길이 체크용)
+        try:
+            self.clip_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+            logger.info("✅ CLIP tokenizer loaded for token length validation")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load CLIP tokenizer: {e}, using fallback")
+            self.clip_tokenizer = None
+        
+        # 토큰 길이 제한 설정
+        self.max_token_length = max_token_length
+        
         # 생성 설정 (사용되지 않지만 호환성을 위해 유지)
         self.generation_config = {
             'max_new_tokens': max_new_tokens,
@@ -84,8 +102,74 @@ class VLMWrapper(nn.Module):
             'do_sample': do_sample
         }
         
-        logger.info("✅ VLM Wrapper initialized with placeholder-based enhancement")
+        logger.info(f"✅ VLM Wrapper initialized with placeholder-based enhancement (max_tokens: {max_token_length})")
     
+    def _count_tokens(self, text: str) -> int:
+        """
+        텍스트의 토큰 개수를 계산
+        
+        Args:
+            text (str): 토큰 개수를 계산할 텍스트
+            
+        Returns:
+            int: 토큰 개수
+        """
+        if not text:
+            return 0
+            
+        try:
+            if self.clip_tokenizer:
+                # CLIP tokenizer 사용
+                tokens = self.clip_tokenizer.encode(text, add_special_tokens=True)
+                return len(tokens)
+            else:
+                # Fallback: 대략적인 토큰 개수 추정 (영어 기준 평균 4자당 1토큰)
+                return len(text.split()) + len(text) // 20
+        except Exception as e:
+            logger.warning(f"⚠️ Token counting failed: {e}, using fallback")
+            return len(text.split()) + len(text) // 20
+
+    def _truncate_to_token_limit(self, text: str, max_tokens: int) -> str:
+        """
+        텍스트를 토큰 제한에 맞게 잘라냄
+        
+        Args:
+            text (str): 잘라낼 텍스트
+            max_tokens (int): 최대 토큰 수
+            
+        Returns:
+            str: 잘라낸 텍스트
+        """
+        if not text:
+            return text
+            
+        current_tokens = self._count_tokens(text)
+        if current_tokens <= max_tokens:
+            return text
+        
+        # 토큰 단위로 잘라내기
+        words = text.split()
+        truncated_text = ""
+        
+        for word in words:
+            test_text = truncated_text + (" " if truncated_text else "") + word
+            if self._count_tokens(test_text) > max_tokens:
+                break
+            truncated_text = test_text
+        
+        if not truncated_text:  # 단어 하나도 못 넣은 경우
+            # 문자 단위로 잘라내기
+            for i in range(len(text)):
+                test_text = text[:i+1]
+                if self._count_tokens(test_text) > max_tokens:
+                    truncated_text = text[:i] if i > 0 else text[:1]
+                    break
+            else:
+                truncated_text = text
+        
+        logger.debug(f"🔄 Truncated text from {current_tokens} to {self._count_tokens(truncated_text)} tokens")
+        return truncated_text
+
     def _load_model(self):
         """
         모델 로드 메서드 (플레이스홀더 방식에서는 사용되지 않음)
@@ -95,13 +179,13 @@ class VLMWrapper(nn.Module):
     
     def enhance_prompt(self, user_prompt: str) -> str:
         """
-        사용자 프롬프트를 간단한 플레이스홀더 방식으로 개선
+        사용자 프롬프트를 간단한 플레이스홀더 방식으로 개선하되, 77토큰 제한을 준수
         
         Args:
             user_prompt (str): 개선할 원본 프롬프트
             
         Returns:
-            str: 개선된 프롬프트
+            str: 개선된 프롬프트 (77토큰 이하)
         """
         if not user_prompt or not user_prompt.strip():
             logger.warning("⚠️ Empty prompt provided, using fallback")
@@ -114,22 +198,44 @@ class VLMWrapper(nn.Module):
                 user_prompt = user_prompt[:200]
                 logger.warning("⚠️ Prompt truncated to 200 characters")
             
-            # 간단한 플레이스홀더 기반 개선
-            enhanced_prompt = self._enhance_with_placeholders(user_prompt)
+            # 사용자 프롬프트의 토큰 수 확인
+            user_prompt_tokens = self._count_tokens(user_prompt)
+            logger.debug(f"📊 User prompt tokens: {user_prompt_tokens}/{self.max_token_length}")
             
-            logger.debug(f"✅ Enhanced: '{user_prompt}' → '{enhanced_prompt}'")
+            if user_prompt_tokens >= self.max_token_length:
+                # 사용자 프롬프트가 이미 제한을 초과하는 경우 잘라내기
+                user_prompt = self._truncate_to_token_limit(user_prompt, self.max_token_length - 5)
+                logger.warning(f"⚠️ User prompt truncated to fit token limit: {user_prompt}")
+                return user_prompt
+            
+            # 개선할 수 있는 토큰 수 계산
+            available_tokens = self.max_token_length - user_prompt_tokens
+            logger.debug(f"📊 Available tokens for enhancement: {available_tokens}")
+            
+            # 간단한 플레이스홀더 기반 개선
+            enhanced_prompt = self._enhance_with_placeholders(user_prompt, available_tokens)
+            
+            # 최종 토큰 길이 검증
+            final_tokens = self._count_tokens(enhanced_prompt)
+            if final_tokens > self.max_token_length:
+                enhanced_prompt = self._truncate_to_token_limit(enhanced_prompt, self.max_token_length)
+                logger.warning(f"⚠️ Enhanced prompt truncated to fit token limit")
+            
+            logger.debug(f"✅ Enhanced: '{user_prompt}' → '{enhanced_prompt}' ({final_tokens} tokens)")
             return enhanced_prompt
             
         except Exception as e:
             logger.warning(f"⚠️ Prompt enhancement failed: {e}")
-            return self._fallback_enhancement(user_prompt)
+            fallback = self._fallback_enhancement(user_prompt)
+            return self._truncate_to_token_limit(fallback, self.max_token_length)
     
-    def _enhance_with_placeholders(self, user_prompt: str) -> str:
+    def _enhance_with_placeholders(self, user_prompt: str, available_tokens: int = None) -> str:
         """
-        플레이스홀더를 사용한 간단한 프롬프트 개선
+        플레이스홀더를 사용한 간단한 프롬프트 개선 (토큰 제한 고려)
         
         Args:
             user_prompt (str): 원본 프롬프트
+            available_tokens (int): 개선에 사용할 수 있는 토큰 수
             
         Returns:
             str: 개선된 프롬프트
@@ -179,12 +285,24 @@ class VLMWrapper(nn.Module):
         # 카테고리별 키워드 추가
         if detected_category:
             category_words = category_keywords[detected_category]
-            enhanced_parts.extend(category_words[:2])  # 상위 2개만 사용
+            for word in category_words[:2]:  # 상위 2개만 사용
+                test_prompt = ", ".join(enhanced_parts + [word])
+                if available_tokens is None or self._count_tokens(test_prompt) <= self.max_token_length:
+                    enhanced_parts.append(word)
+                else:
+                    break
         
-        # 품질 키워드 추가
+        # 품질 키워드 추가 (토큰 제한 고려)
         import random
-        enhanced_parts.extend(random.sample(quality_keywords, 2))
-        enhanced_parts.extend(random.sample(style_keywords, 1))
+        all_keywords = quality_keywords + style_keywords
+        random.shuffle(all_keywords)
+        
+        for keyword in all_keywords[:4]:  # 최대 4개 키워드 시도
+            test_prompt = ", ".join(enhanced_parts + [keyword])
+            if available_tokens is None or self._count_tokens(test_prompt) <= self.max_token_length:
+                enhanced_parts.append(keyword)
+            else:
+                break
         
         # 최종 프롬프트 조합
         enhanced_prompt = ", ".join(enhanced_parts)
@@ -273,7 +391,7 @@ class VLMWrapper(nn.Module):
     
     def _fallback_enhancement(self, user_prompt: str) -> str:
         """
-        Qwen2.5-VL 개선 실패 시 사용할 기본 개선 방법
+        Qwen2.5-VL 개선 실패 시 사용할 기본 개선 방법 (토큰 제한 고려)
         
         이 메서드는 Qwen2.5-VL이 실패했을 때 규칙 기반으로
         기본적인 프롬프트 개선을 수행합니다.
@@ -282,7 +400,7 @@ class VLMWrapper(nn.Module):
             user_prompt (str): 원본 프롬프트
             
         Returns:
-            str: 기본 개선된 프롬프트
+            str: 기본 개선된 프롬프트 (77토큰 이하)
         """
         # 기본 품질 향상 키워드 추가
         quality_keywords = [
@@ -290,13 +408,29 @@ class VLMWrapper(nn.Module):
             "well-lit", "sharp focus", "artistic"
         ]
         
-        # 랜덤하게 2-3개 키워드 선택
+        # 사용자 프롬프트의 토큰 수 확인
+        user_tokens = self._count_tokens(user_prompt)
+        available_tokens = self.max_token_length - user_tokens
+        
+        if available_tokens <= 5:  # 여유 토큰이 너무 적으면 원본만 반환
+            return self._truncate_to_token_limit(user_prompt, self.max_token_length)
+        
+        # 토큰 제한을 고려하여 키워드 추가
+        enhanced_parts = [user_prompt]
+        
         import random
-        selected_keywords = random.sample(quality_keywords, k=min(3, len(quality_keywords)))
+        random.shuffle(quality_keywords)
         
-        enhanced = f"{user_prompt}, {', '.join(selected_keywords)}"
+        for keyword in quality_keywords:
+            test_prompt = ", ".join(enhanced_parts + [keyword])
+            if self._count_tokens(test_prompt) <= self.max_token_length:
+                enhanced_parts.append(keyword)
+            else:
+                break
         
-        logger.info(f"🔄 Using fallback enhancement: {enhanced}")
+        enhanced = ", ".join(enhanced_parts)
+        
+        logger.info(f"🔄 Using fallback enhancement: {enhanced} ({self._count_tokens(enhanced)} tokens)")
         return enhanced
     
     def get_model_info(self) -> Dict:
