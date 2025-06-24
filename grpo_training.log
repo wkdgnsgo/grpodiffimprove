@@ -62,3 +62,28 @@ Please note that you may need to restart your runtime after installation.
 2025-06-24 13:57:35,570 - __main__ - INFO - 🤖 Initializing models...
 2025-06-24 13:57:35,570 - models.qwen_wrapper - INFO - 🚀 Using assigned GPU for QWEN: cpu
 2025-06-24 13:57:35,570 - models.qwen_wrapper - INFO - 📥 Loading QWEN VL model: Qwen/Qwen2-VL-7B-Instruct
+2025-06-24 13:58:14,176 - models.qwen_wrapper - ERROR - ❌ Failed to load model: 
+AutoVideoProcessor requires the Torchvision library but it was not found in your environment. Checkout the instructions on the
+installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+Please note that you may need to restart your runtime after installation.
+
+2025-06-24 13:58:14,176 - __main__ - ERROR - ❌ Fatal error: 
+AutoVideoProcessor requires the Torchvision library but it was not found in your environment. Checkout the instructions on the
+installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+Please note that you may need to restart your runtime after installation.
+
+2025-06-24 13:58:35,982 - __main__ - INFO - 🚀 Starting GRPO Training (EasyR1 Implementation)
+2025-06-24 13:58:35,983 - __main__ - INFO - Configuration: {'num_iterations': 3, 'group_size': 2, 'learning_rate': 1e-06, 'kl_type': 'adaptive', 'max_new_tokens': 5, 'save_training_data': True, 'checkpoint_interval': 10, 'validation_interval': 5}
+2025-06-24 13:58:35,983 - __main__ - INFO - 🔧 Setting up multi-GPU environment...
+2025-06-24 13:58:35,983 - gpu_config - INFO - ❌ CUDA not available
+2025-06-24 13:58:35,983 - __main__ - INFO - 🤖 Initializing models...
+2025-06-24 13:58:35,983 - models.qwen_wrapper - INFO - 🚀 Using assigned GPU for QWEN: cpu
+2025-06-24 13:58:35,983 - models.qwen_wrapper - INFO - 📥 Loading QWEN VL model: Qwen/Qwen2-VL-7B-Instruct
+2025-06-24 14:05:29,239 - __main__ - INFO - 🚀 Starting GRPO Training (EasyR1 Implementation)
+2025-06-24 14:05:29,240 - __main__ - INFO - Configuration: {'num_iterations': 2, 'group_size': 1, 'learning_rate': 1e-07, 'kl_type': 'adaptive', 'max_new_tokens': 3, 'save_training_data': False, 'checkpoint_interval': 10, 'validation_interval': 5}
+2025-06-24 14:05:29,240 - __main__ - INFO - 🔧 Setting up multi-GPU environment...
+2025-06-24 14:05:29,240 - gpu_config - INFO - ❌ CUDA not available
+2025-06-24 14:05:29,240 - __main__ - INFO - 🤖 Initializing models...
+2025-06-24 14:05:29,240 - models.qwen_wrapper - INFO - 🚀 Using assigned GPU for QWEN: cpu
+2025-06-24 14:05:29,240 - models.qwen_wrapper - INFO - 📥 Loading QWEN VL model: Qwen/Qwen2-VL-7B-Instruct
+2025-06-24 14:08:01,135 - __main__ - INFO - ⏹️ Training interrupted by user

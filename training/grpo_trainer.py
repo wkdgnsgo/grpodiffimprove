@@ -325,7 +325,17 @@ class PromptEnvironment:
         with torch.no_grad():
             embeddings = self.qwen_model.model.get_input_embeddings()(state_token_ids.unsqueeze(0))
             state = embeddings.mean(dim=1).squeeze(0)
-            state = F.normalize(state, dim=-1, eps=self.config.epsilon_std)
+            
+            # 더 안정적인 정규화
+            state_norm = state.norm(dim=-1, keepdim=True)
+            # 매우 작은 norm 방지
+            state_norm = torch.clamp(state_norm, min=self.config.epsilon_std)
+            state = state / state_norm
+            
+            # NaN/Inf 체크
+            if torch.isnan(state).any() or torch.isinf(state).any():
+                logger.warning("⚠️ NaN/Inf in state embedding, using zero state")
+                state = torch.zeros_like(state)
         
         return state
     
@@ -445,26 +455,44 @@ class GRPOTrainer:
         else:
             self.device = torch.device(config.device)
         
-        # 액션 헤드
+        # 액션 헤드 (더 안정적인 multi-layer 구조)
         qwen_dtype = next(self.qwen_model.model.parameters()).dtype
-        self.action_head = nn.Linear(
-            self.env.get_state_dimension(),
-            self.env.get_action_space_size(),
-            dtype=qwen_dtype
+        hidden_size = self.env.get_state_dimension()
+        action_size = self.env.get_action_space_size()
+        
+        logger.info(f"🎯 Action head: {hidden_size} -> {action_size} ({qwen_dtype})")
+        
+        # Multi-layer action head로 안정성 확보
+        intermediate_size = min(512, action_size)  # 중간 크기 제한
+        
+        self.action_head = nn.Sequential(
+            nn.Linear(hidden_size, intermediate_size, dtype=qwen_dtype),
+            nn.LayerNorm(intermediate_size, dtype=qwen_dtype),
+            nn.Tanh(),  # 안정적인 활성화 함수
+            nn.Linear(intermediate_size, action_size, dtype=qwen_dtype)
         ).to(self.device)
         
-        # 가중치 초기화
-        nn.init.xavier_uniform_(self.action_head.weight)
-        nn.init.zeros_(self.action_head.bias)
+        # 더 보수적인 가중치 초기화
+        with torch.no_grad():
+            for module in self.action_head:
+                if isinstance(module, nn.Linear):
+                    # 매우 작은 초기화
+                    nn.init.xavier_normal_(module.weight, gain=0.01)
+                    nn.init.zeros_(module.bias)
+                    # 추가 스케일링
+                    module.weight.mul_(0.01)
         
-        # 옵티마이저
-        self.optimizer = optim.AdamW(
-            list(self.qwen_model.model.parameters()) + list(self.action_head.parameters()),
-            lr=config.learning_rate,
-            eps=1e-8,
-            weight_decay=1e-6,
-            betas=(0.9, 0.95)
-        )
+        logger.info(f"🔧 Multi-layer action head initialized: {hidden_size}->{intermediate_size}->{action_size}")
+        
+        # 옵티마이저 (더 낮은 학습률)
+        action_head_params = list(self.action_head.parameters())
+        qwen_params = list(self.qwen_model.model.parameters())
+        
+        # Action head는 더 낮은 학습률 적용
+        self.optimizer = optim.AdamW([
+            {'params': qwen_params, 'lr': config.learning_rate},
+            {'params': action_head_params, 'lr': config.learning_rate * 0.1}  # 10배 낮은 학습률
+        ], eps=1e-8, weight_decay=1e-6, betas=(0.9, 0.95))
         
         # KL Controller
         self.kl_controller = self._get_kl_controller()
@@ -497,16 +525,31 @@ class GRPOTrainer:
             raise ValueError(f"Unknown kl type: {self.config.kl_type}.")
     
     def get_action_distribution(self, state: torch.Tensor) -> Categorical:
-        state = state.to(dtype=self.action_head.weight.dtype)
-        action_logits = self.action_head(state)
+        # State 검증 및 정리
+        if torch.isnan(state).any() or torch.isinf(state).any():
+            logger.warning("⚠️ NaN/Inf in state, using zero state")
+            state = torch.zeros_like(state)
         
-        # NaN 처리
+        # dtype 일치 확인
+        state = state.to(dtype=self.action_head[0].weight.dtype, device=self.device)
+        
+        # Forward pass
+        if self.action_head.training:
+            action_logits = self.action_head(state)
+        else:
+            with torch.no_grad():
+                action_logits = self.action_head(state)
+        
+        # Logits 검증 및 처리
         if torch.isnan(action_logits).any() or torch.isinf(action_logits).any():
-            logger.warning("⚠️ NaN/Inf in logits, using uniform")
+            logger.warning("⚠️ NaN/Inf in logits, using uniform distribution")
             action_logits = torch.zeros_like(action_logits)
         
-        # 클리핑
-        action_logits = torch.clamp(action_logits, min=-20.0, max=20.0)
+        # 더 강한 클리핑 (안정성 확보)
+        action_logits = torch.clamp(action_logits, min=-10.0, max=10.0)
+        
+        # Temperature scaling 적용
+        action_logits = action_logits / self.config.temperature
         
         return Categorical(logits=action_logits)
     
@@ -615,7 +658,8 @@ class GRPOTrainer:
             advantages, returns = compute_grpo_outcome_advantage(
                 token_rewards, response_mask, index
             )
-            advantages_list.append(advantages.squeeze(0))
+            # Advantage는 gradient가 필요 없음
+            advantages_list.append(advantages.squeeze(0).detach())
         
         # 3. Policy 업데이트
         total_policy_loss = 0
@@ -625,63 +669,114 @@ class GRPOTrainer:
             for i in range(len(group_data['states'])):
                 states = group_data['states'][i]
                 actions = group_data['actions'][i]
-                old_log_probs = group_data['log_probs_old'][i]
+                old_log_probs = group_data['log_probs_old'][i].detach()  # gradient 차단
                 advantages = advantages_list[i]
                 
-                # 현재 log probs 계산
-                action_dists = []
-                for state in states:
-                    action_dist = self.get_action_distribution(state)
-                    action_dists.append(action_dist)
+                # Skip if empty
+                if len(states) == 0:
+                    continue
                 
-                current_log_probs = torch.stack([
-                    dist.log_prob(action) for dist, action in zip(action_dists, actions)
-                ])
-                
-                # 응답 마스크
-                response_mask = torch.ones_like(current_log_probs)
-                
-                # Policy loss 계산
-                policy_loss, metrics = compute_policy_loss(
-                    old_log_probs, current_log_probs, advantages, response_mask,
-                    self.config.clip_ratio_low, self.config.clip_ratio_high,
-                    self.config.clip_ratio_dual, self.config.loss_avg_mode
-                )
-                
-                # 역전파
-                self.optimizer.zero_grad()
-                policy_loss.backward()
-                
-                # 그래디언트 클리핑
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.qwen_model.model.parameters()) + list(self.action_head.parameters()),
-                    max_norm=self.config.max_grad_norm
-                )
-                
-                self.optimizer.step()
-                
-                total_policy_loss += policy_loss.item()
-                for k, v in metrics.items():
-                    total_metrics[k] += v
+                try:
+                    # 현재 log probs 계산 (gradient 필요)
+                    current_log_probs = []
+                    for j, state in enumerate(states):
+                        # State가 gradient를 가지지 않도록 확인
+                        state_clean = state.detach().requires_grad_(False)
+                        
+                        action_dist = self.get_action_distribution(state_clean)
+                        log_prob = action_dist.log_prob(actions[j])
+                        current_log_probs.append(log_prob)
+                    
+                    current_log_probs = torch.stack(current_log_probs)
+                    
+                    # NaN/Inf 체크
+                    if torch.isnan(current_log_probs).any() or torch.isinf(current_log_probs).any():
+                        logger.warning(f"⚠️ NaN/Inf in current_log_probs, skipping")
+                        continue
+                    
+                    # 응답 마스크
+                    response_mask = torch.ones_like(current_log_probs)
+                    
+                    # Policy loss 계산
+                    policy_loss, metrics = compute_policy_loss(
+                        old_log_probs, current_log_probs, advantages, response_mask,
+                        self.config.clip_ratio_low, self.config.clip_ratio_high,
+                        self.config.clip_ratio_dual, self.config.loss_avg_mode
+                    )
+                    
+                    # Loss가 유효한지 체크
+                    if torch.isnan(policy_loss) or torch.isinf(policy_loss):
+                        logger.warning(f"⚠️ NaN/Inf in policy_loss, skipping")
+                        continue
+                    
+                    # 역전파
+                    self.optimizer.zero_grad()
+                    policy_loss.backward()
+                    
+                    # 그래디언트 상태 체크
+                    grad_norm = self._check_gradients()
+                    
+                    # 그래디언트 클리핑
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.qwen_model.model.parameters()) + list(self.action_head.parameters()),
+                        max_norm=self.config.max_grad_norm
+                    )
+                    
+                    self.optimizer.step()
+                    
+                    total_policy_loss += policy_loss.item()
+                    for k, v in metrics.items():
+                        total_metrics[k] += v
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Error in policy update: {e}")
+                    continue
         
         # 4. KL Controller 업데이트
-        avg_kl = total_metrics.get('ppo_kl', 0.0) / max(len(group_data['states']) * self.config.grpo_epochs, 1)
+        num_updates = len(group_data['states']) * self.config.grpo_epochs
+        avg_kl = total_metrics.get('ppo_kl', 0.0) / max(num_updates, 1) if total_metrics else 0.0
         self.kl_controller.update(avg_kl, 1)
         
         # 5. 통계 저장
         avg_reward = np.mean(group_data['episode_rewards']) if group_data['episode_rewards'] else 0.0
         self.iteration_rewards.append(avg_reward)
-        self.iteration_policy_losses.append(total_policy_loss / max(len(group_data['states']) * self.config.grpo_epochs, 1))
+        avg_policy_loss = total_policy_loss / max(num_updates, 1) if total_policy_loss > 0 else 0.0
+        self.iteration_policy_losses.append(avg_policy_loss)
         self.iteration_kl_divs.append(avg_kl)
         
         result = {
             'avg_reward': avg_reward,
-            'policy_loss': self.iteration_policy_losses[-1],
+            'policy_loss': avg_policy_loss,
             'kl_div': avg_kl,
             'kl_coef': self.kl_controller.kl_coef,
             'num_episodes': len(group_data['episode_rewards'])
         }
         
-        logger.info(f"✅ Iteration {self.current_iteration}: reward={avg_reward:.3f}, loss={result['policy_loss']:.3f}, kl={avg_kl:.3f}")
+        logger.info(f"✅ Iteration {self.current_iteration}: reward={avg_reward:.3f}, loss={avg_policy_loss:.3f}, kl={avg_kl:.3f}")
         
-        return result 
+        return result
+
+    def _check_gradients(self):
+        """그래디언트 상태 체크"""
+        total_norm = 0.0
+        nan_count = 0
+        
+        for name, param in self.action_head.named_parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+                
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    logger.warning(f"⚠️ NaN/Inf gradient in {name}")
+                    param.grad.data.zero_()
+                    nan_count += 1
+        
+        total_norm = total_norm ** (1. / 2)
+        
+        if nan_count > 0:
+            logger.warning(f"⚠️ Zeroed {nan_count} NaN/Inf gradients")
+        
+        if total_norm > 100.0:
+            logger.warning(f"⚠️ Large gradient norm: {total_norm:.2f}")
+        
+        return total_norm 
