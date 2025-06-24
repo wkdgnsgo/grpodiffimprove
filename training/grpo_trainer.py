@@ -106,7 +106,7 @@ class PromptEnvironment:
         base_placeholder = ", high quality, detailed"
         self.current_prompt = user_prompt + base_placeholder
         
-        # 현재 상태를 토큰 ID로 변환
+        # 현재 상태를 토큰 ID로 변환 (CPU에서 처리)
         self.current_token_ids = self.tokenizer.encode(
             self.current_prompt, 
             add_special_tokens=False,
@@ -128,6 +128,10 @@ class PromptEnvironment:
             state_token_ids = self.current_token_ids[-max_state_tokens:]
         else:
             state_token_ids = self.current_token_ids
+        
+        # 토큰 ID를 올바른 장치로 이동
+        device = next(self.qwen_model.model.parameters()).device
+        state_token_ids = state_token_ids.to(device)
         
         # 토큰 임베딩으로 변환
         with torch.no_grad():
@@ -157,7 +161,7 @@ class PromptEnvironment:
         selected_token_text = self.tokenizer.decode([selected_token_id])
         self.current_prompt += " " + selected_token_text.strip()
         
-        # 토큰 ID 업데이트
+        # 토큰 ID 업데이트 (CPU에서 처리)
         self.current_token_ids = self.tokenizer.encode(
             self.current_prompt,
             add_special_tokens=False,
