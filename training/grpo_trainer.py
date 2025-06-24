@@ -300,8 +300,18 @@ class PromptEnvironment:
     
     def reset(self, user_prompt: str) -> torch.Tensor:
         self.user_prompt = user_prompt
-        base_placeholder = ", high quality, detailed"
-        self.current_prompt = user_prompt + base_placeholder
+        
+        # QwenWrapper의 enhance_prompt 메서드 사용
+        try:
+            # QWEN VL 모델로 프롬프트 향상
+            enhancement_result = self.qwen_model.enhance_prompt(user_prompt)
+            self.current_prompt = enhancement_result['enhanced_prompt']
+            logger.info(f"🎯 QWEN enhanced: '{user_prompt}' -> '{self.current_prompt}'")
+        except Exception as e:
+            # 실패 시 fallback: 기본 placeholder 추가
+            fallback_placeholder = ", high quality, detailed, professional photography"
+            self.current_prompt = user_prompt + fallback_placeholder
+            logger.warning(f"⚠️ QWEN enhancement failed, using fallback: {e}")
         
         self.current_token_ids = self.tokenizer.encode(
             self.current_prompt, 
@@ -310,6 +320,7 @@ class PromptEnvironment:
         ).squeeze(0)
         
         self.current_step = 0
+        logger.info(f"🔄 Environment reset completed")
         return self._get_state()
     
     def _get_state(self) -> torch.Tensor:

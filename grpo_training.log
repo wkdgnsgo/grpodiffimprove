@@ -87,3 +87,11 @@ Please note that you may need to restart your runtime after installation.
 2025-06-24 14:05:29,240 - models.qwen_wrapper - INFO - 🚀 Using assigned GPU for QWEN: cpu
 2025-06-24 14:05:29,240 - models.qwen_wrapper - INFO - 📥 Loading QWEN VL model: Qwen/Qwen2-VL-7B-Instruct
 2025-06-24 14:08:01,135 - __main__ - INFO - ⏹️ Training interrupted by user
+2025-06-24 14:17:58,169 - __main__ - INFO - 🚀 Starting GRPO Training (EasyR1 Implementation)
+2025-06-24 14:17:58,169 - __main__ - INFO - Configuration: {'num_iterations': 1, 'group_size': 1, 'learning_rate': 1e-08, 'kl_type': 'adaptive', 'max_new_tokens': 2, 'save_training_data': True, 'checkpoint_interval': 10, 'validation_interval': 5}
+2025-06-24 14:17:58,169 - __main__ - INFO - 🔧 Setting up multi-GPU environment...
+2025-06-24 14:17:58,169 - gpu_config - INFO - ❌ CUDA not available
+2025-06-24 14:17:58,169 - __main__ - INFO - 🤖 Initializing models...
+2025-06-24 14:17:58,169 - models.qwen_wrapper - INFO - 🚀 Using assigned GPU for QWEN: cpu
+2025-06-24 14:17:58,169 - models.qwen_wrapper - INFO - 📥 Loading QWEN VL model: Qwen/Qwen2-VL-7B-Instruct
+2025-06-24 14:19:39,969 - __main__ - INFO - ⏹️ Training interrupted by user

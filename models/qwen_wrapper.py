@@ -149,44 +149,41 @@ class QwenWrapper:
             raise
     
     def _setup_prompt_template(self):
-        """프롬프트 템플릿 설정 - user_prompt + placeholder 방식"""
-        # Placeholder 템플릿 (user_prompt 뒤에 추가됨)
-        self.placeholder_template = ", high quality, detailed, professional photography, cinematic lighting, artistic composition, 4k resolution"
+        """프롬프트 템플릿 설정 - QWEN이 직접 다양한 프롬프트 생성"""
+        # placeholder_template 제거 - QWEN이 직접 생성하도록 함
         
         # 생성 지시를 위한 시스템 프롬프트
         self.system_prompt = """You are an expert at enhancing image generation prompts. 
-Given a user prompt with a placeholder, complete the prompt by adding artistic details, style descriptions, and technical specifications.
+Given a simple user prompt, expand it into a detailed, creative, and high-quality prompt for image generation.
 
 Guidelines:
-- Keep the original user prompt unchanged
-- Add detailed descriptions after the placeholder
-- Include artistic style, lighting, composition details
-- Make it suitable for high-quality image generation
-- Be concise but descriptive"""
+- Keep the original concept unchanged
+- Add artistic style, mood, and atmosphere
+- Include technical specifications (lighting, composition, resolution)
+- Add creative details that make the image more interesting
+- Make each enhancement unique and varied
+- Be descriptive but concise (aim for 20-40 additional words)"""
 
-        # 사용자 입력 템플릿 (user_prompt + placeholder)
-        self.user_template = """{user_prompt_with_placeholder}
+        # 사용자 입력 템플릿
+        self.user_template = """Original prompt: {user_prompt}
 
-Complete this prompt with detailed enhancements: """
+Enhanced version:"""
     
     def enhance_prompt(self, user_prompt: str) -> Dict[str, str]:
         """
-        User prompt + placeholder를 향상된 prompt로 변환
+        User prompt를 QWEN VL로 직접 향상된 prompt로 변환
         
         Args:
             user_prompt (str): 원본 사용자 프롬프트
             
         Returns:
-            Dict[str, str]: 원본, placeholder 추가, 최종 향상된 프롬프트를 포함한 결과
+            Dict[str, str]: 원본과 향상된 프롬프트를 포함한 결과
         """
         try:
-            # Step 1: user_prompt + placeholder 생성
-            user_prompt_with_placeholder = user_prompt + self.placeholder_template
-            
-            # Step 2: VLM에 입력할 메시지 구성
+            # VLM에 입력할 메시지 구성
             messages = [
                 {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": self.user_template.format(user_prompt_with_placeholder=user_prompt_with_placeholder)}
+                {"role": "user", "content": self.user_template.format(user_prompt=user_prompt)}
             ]
             
             # 템플릿 적용
@@ -223,22 +220,19 @@ Complete this prompt with detailed enhancements: """
             
             result = {
                 'original_prompt': user_prompt,
-                'prompt_with_placeholder': user_prompt_with_placeholder,
                 'enhanced_prompt': enhanced_prompt,
                 'raw_output': generated_text
             }
             
-            logger.info(f"✨ Enhanced prompt: '{user_prompt}' + placeholder -> '{enhanced_prompt[:50]}...'")
+            logger.info(f"✨ Enhanced prompt: '{user_prompt}' -> '{enhanced_prompt[:50]}...'")
             return result
             
         except Exception as e:
             logger.error(f"❌ Prompt enhancement failed: {e}")
-            # 실패 시 placeholder만 추가된 버전 반환
-            user_prompt_with_placeholder = user_prompt + self.placeholder_template
+            # 실패 시 원본 프롬프트 반환
             return {
                 'original_prompt': user_prompt,
-                'prompt_with_placeholder': user_prompt_with_placeholder,
-                'enhanced_prompt': user_prompt_with_placeholder,
+                'enhanced_prompt': user_prompt,
                 'raw_output': f"Error: {e}"
             }
     
