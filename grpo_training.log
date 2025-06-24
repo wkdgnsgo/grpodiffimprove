@@ -55,3 +55,10 @@ AutoVideoProcessor requires the Torchvision library but it was not found in your
 installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
 Please note that you may need to restart your runtime after installation.
 
+2025-06-24 13:57:35,569 - __main__ - INFO - 🚀 Starting GRPO Training (EasyR1 Implementation)
+2025-06-24 13:57:35,570 - __main__ - INFO - Configuration: {'num_iterations': 5, 'group_size': 2, 'learning_rate': 1e-06, 'kl_type': 'adaptive', 'max_new_tokens': 8, 'save_training_data': True, 'checkpoint_interval': 10, 'validation_interval': 5}
+2025-06-24 13:57:35,570 - __main__ - INFO - 🔧 Setting up multi-GPU environment...
+2025-06-24 13:57:35,570 - gpu_config - INFO - ❌ CUDA not available
+2025-06-24 13:57:35,570 - __main__ - INFO - 🤖 Initializing models...
+2025-06-24 13:57:35,570 - models.qwen_wrapper - INFO - 🚀 Using assigned GPU for QWEN: cpu
+2025-06-24 13:57:35,570 - models.qwen_wrapper - INFO - 📥 Loading QWEN VL model: Qwen/Qwen2-VL-7B-Instruct
