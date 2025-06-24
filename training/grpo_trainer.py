@@ -237,9 +237,12 @@ class GRPOTrainer:
             self.device = torch.device(config.device)
         
         # 정책 네트워크 (QWEN 모델을 액션 확률 분포 출력하도록 어댑터 추가)
+        # QWEN 모델과 같은 데이터 타입 사용
+        qwen_dtype = next(self.qwen_model.model.parameters()).dtype
         self.action_head = nn.Linear(
             self.env.get_state_dimension(),
-            self.env.get_action_space_size()
+            self.env.get_action_space_size(),
+            dtype=qwen_dtype
         ).to(self.device)
         
         # 옵티마이저 (QWEN 모델 + 액션 헤드 함께 학습)
@@ -260,6 +263,9 @@ class GRPOTrainer:
         """
         상태에서 액션 확률 분포 계산
         """
+        # 상태 텐서를 action_head와 같은 데이터 타입으로 변환
+        state = state.to(dtype=self.action_head.weight.dtype)
+        
         # QWEN 모델의 hidden state에서 액션 로짓 계산
         action_logits = self.action_head(state)
         return Categorical(logits=action_logits)

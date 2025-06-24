@@ -17,3 +17,41 @@ AutoVideoProcessor requires the Torchvision library but it was not found in your
 installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
 Please note that you may need to restart your runtime after installation.
 
+2025-06-24 13:34:27,096 - __main__ - INFO - 🚀 Starting GRPO Training for QWEN Model
+2025-06-24 13:34:27,096 - __main__ - INFO - 🔧 Setting up Multi-GPU environment...
+2025-06-24 13:34:27,097 - gpu_config - INFO - ❌ CUDA not available
+2025-06-24 13:34:27,097 - __main__ - INFO - 📥 Initializing models on assigned GPUs...
+2025-06-24 13:34:27,097 - __main__ - INFO -   🎯 QWEN VL → GPU 1 (cuda:0)
+2025-06-24 13:34:27,097 - __main__ - INFO -   🖼️ SD3 → GPU 2 (cuda:1)
+2025-06-24 13:34:27,097 - __main__ - INFO -   📏 CLIP → GPU 3 (cuda:2)
+2025-06-24 13:34:27,097 - models.qwen_wrapper - INFO - 🚀 Using assigned GPU for QWEN: cpu
+2025-06-24 13:34:27,097 - models.qwen_wrapper - INFO - 📥 Loading QWEN VL model: Qwen/Qwen2-VL-7B-Instruct
+2025-06-24 13:34:33,599 - models.qwen_wrapper - ERROR - ❌ Failed to load model: 
+AutoVideoProcessor requires the Torchvision library but it was not found in your environment. Checkout the instructions on the
+installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+Please note that you may need to restart your runtime after installation.
+
+2025-06-24 13:34:33,599 - __main__ - ERROR - ❌ Training failed with error: 
+AutoVideoProcessor requires the Torchvision library but it was not found in your environment. Checkout the instructions on the
+installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+Please note that you may need to restart your runtime after installation.
+
+2025-06-24 13:34:37,378 - __main__ - INFO - 🚀 Starting GRPO Training for QWEN Model
+2025-06-24 13:34:37,378 - __main__ - INFO - 🔧 Setting up Multi-GPU environment...
+2025-06-24 13:34:37,378 - gpu_config - INFO - ❌ CUDA not available
+2025-06-24 13:34:37,378 - __main__ - INFO - 📥 Initializing models on assigned GPUs...
+2025-06-24 13:34:37,378 - __main__ - INFO -   🎯 QWEN VL → GPU 1 (cuda:0)
+2025-06-24 13:34:37,378 - __main__ - INFO -   🖼️ SD3 → GPU 2 (cuda:1)
+2025-06-24 13:34:37,378 - __main__ - INFO -   📏 CLIP → GPU 3 (cuda:2)
+2025-06-24 13:34:37,378 - models.qwen_wrapper - INFO - 🚀 Using assigned GPU for QWEN: cpu
+2025-06-24 13:34:37,378 - models.qwen_wrapper - INFO - 📥 Loading QWEN VL model: Qwen/Qwen2-VL-7B-Instruct
+2025-06-24 13:34:39,215 - models.qwen_wrapper - ERROR - ❌ Failed to load model: 
+AutoVideoProcessor requires the Torchvision library but it was not found in your environment. Checkout the instructions on the
+installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+Please note that you may need to restart your runtime after installation.
+
+2025-06-24 13:34:39,215 - __main__ - ERROR - ❌ Training failed with error: 
+AutoVideoProcessor requires the Torchvision library but it was not found in your environment. Checkout the instructions on the
+installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+Please note that you may need to restart your runtime after installation.
+
