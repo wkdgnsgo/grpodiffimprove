@@ -28,13 +28,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_stable_diffusion_pipeline():
-    """Stable Diffusion 3 파이프라인 로드"""
+def load_stable_diffusion_pipeline(device="cuda:1"):
+    """Stable Diffusion 3 파이프라인 로드 (GPU 1번)"""
     try:
         from diffusers import StableDiffusion3Pipeline
         import torch
         
-        logger.info("🎨 Stable Diffusion 3 파이프라인 로딩...")
+        logger.info(f"🎨 Stable Diffusion 3 파이프라인 로딩... (Device: {device})")
         
         # GPU 메모리가 충분하지 않을 경우를 대비한 설정
         pipe = StableDiffusion3Pipeline.from_pretrained(
@@ -43,10 +43,10 @@ def load_stable_diffusion_pipeline():
             use_safetensors=True
         )
         
-        # GPU로 이동
+        # 지정된 GPU로 이동
         if torch.cuda.is_available():
-            pipe = pipe.to("cuda")
-            logger.info("✅ SD3 파이프라인을 GPU로 이동")
+            pipe = pipe.to(device)
+            logger.info(f"✅ SD3 파이프라인을 {device}로 이동")
         else:
             logger.warning("⚠️ CUDA 사용 불가, CPU 사용")
         
@@ -91,11 +91,16 @@ def main():
     logger.info("🚀 순수 GRPO VLM 학습 시작")
     logger.info("=" * 80)
     
-    # GPU 확인
+    # GPU 확인 및 배치 계획
     if torch.cuda.is_available():
         logger.info(f"✅ CUDA 사용 가능 - GPU 개수: {torch.cuda.device_count()}")
         for i in range(torch.cuda.device_count()):
             logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+        
+        logger.info("\n🎯 GPU 배치 계획:")
+        logger.info("  GPU 0: QWEN VL 모델 (프롬프트 향상)")
+        logger.info("  GPU 1: Stable Diffusion 3 (이미지 생성)")
+        logger.info("  GPU 2: CLIP 리워드 모델 (리워드 계산)")
     else:
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
@@ -123,20 +128,20 @@ def main():
     logger.info(f"  - KL 계수: {config.kl_coef}")
     
     try:
-        # 1. QWEN VL 모델 로드
+        # 1. QWEN VL 모델 로드 (GPU 0번)
         logger.info("\n🧠 QWEN VL 모델 로딩...")
-        qwen_model = QWENModel()
-        logger.info("✅ QWEN VL 모델 로드 완료")
+        qwen_model = QWENModel(device="cuda:0")
+        logger.info("✅ QWEN VL 모델 로드 완료 (GPU 0)")
         
-        # 2. CLIP 리워드 모델 로드
+        # 2. CLIP 리워드 모델 로드 (GPU 2번)
         logger.info("\n🎯 CLIP 리워드 모델 로딩...")
-        reward_model = CLIPReward()
-        logger.info("✅ CLIP 리워드 모델 로드 완료")
+        reward_model = CLIPReward(device="cuda:2")
+        logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 2)")
         
-        # 3. Stable Diffusion 3 파이프라인 로드
+        # 3. Stable Diffusion 3 파이프라인 로드 (GPU 1번)
         logger.info("\n🎨 Stable Diffusion 3 파이프라인 로딩...")
-        sd_pipeline = load_stable_diffusion_pipeline()
-        logger.info("✅ SD3 파이프라인 로드 완료")
+        sd_pipeline = load_stable_diffusion_pipeline(device="cuda:1")
+        logger.info("✅ SD3 파이프라인 로드 완료 (GPU 1)")
         
         # 4. 순수 GRPO 트레이너 초기화
         logger.info("\n🎯 순수 GRPO 트레이너 초기화...")

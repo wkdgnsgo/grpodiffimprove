@@ -17,10 +17,10 @@
 ## 🏗️ 시스템 구조
 
 ```
-순수 GRPO VLM 학습 시스템
-├── QWEN VL (프롬프트 향상)
-├── Stable Diffusion 3 (이미지 생성)
-├── CLIP (리워드 계산)
+순수 GRPO VLM 학습 시스템 (멀티 GPU 분산)
+├── GPU 0: QWEN VL (프롬프트 향상)
+├── GPU 1: Stable Diffusion 3 (이미지 생성)
+├── GPU 2: CLIP (리워드 계산)
 └── 순수 GRPO 트레이너 (Value Network 없음)
 ```
 
@@ -175,9 +175,18 @@ total_loss = (
 
 ## 🚨 주의사항
 
-1. **GPU 메모리**: SD3는 최소 16GB VRAM 권장
-2. **모델 다운로드**: 첫 실행 시 모델 다운로드로 시간 소요
-3. **Hugging Face 토큰**: SD3 사용을 위해 HF 토큰 필요할 수 있음
+1. **GPU 요구사항**: 최소 3개의 GPU 필요 (QWEN, SD3, CLIP 분산)
+2. **GPU 메모리**: 각 GPU당 최소 16GB VRAM 권장
+3. **모델 다운로드**: 첫 실행 시 모델 다운로드로 시간 소요
+4. **Hugging Face 토큰**: SD3 사용을 위해 HF 토큰 필요할 수 있음
+
+### GPU 배치 전략
+
+- **GPU 0**: QWEN VL 7B 모델 (프롬프트 향상)
+- **GPU 1**: Stable Diffusion 3 Medium (이미지 생성)
+- **GPU 2**: CLIP ViT-B/32 (리워드 계산)
+
+이 배치는 각 모델의 메모리 요구사항과 연산 특성을 고려하여 최적화되었습니다.
 
 ## 📚 참고자료
 
