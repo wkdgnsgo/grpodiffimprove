@@ -215,7 +215,11 @@ def main():
             gamma=0.95,  # 약간 낮은 할인 팩터
             grpo_kl_beta=0.05,  # 높은 KL 페널티로 안정성 확보
             grpo_clip_epsilon=0.2,
-            entropy_coeff=0.02  # 높은 엔트로피로 탐험 장려
+            entropy_coeff=0.02,  # 높은 엔트로피로 탐험 장려
+            
+            # 저장 설정
+            save_training_data=True,
+            save_dir="training_results"
         )
         
         # 3. 트레이너 초기화
@@ -260,6 +264,9 @@ def main():
             logger.info(f"📋 Selected prompts for this iteration:")
             for i, prompt in enumerate(selected_prompts):
                 logger.info(f"  {i+1}. {prompt}")
+            
+            # 트레이너에 현재 iteration 정보 전달
+            trainer.current_iteration = iteration
             
             # 학습 iteration 실행
             try:

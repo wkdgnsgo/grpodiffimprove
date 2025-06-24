@@ -1,17 +1,17 @@
 """
-GRPO Trainer for QWEN Model
-===========================
+GRPO Trainer for QWEN Model (Enhanced with EasyR1 Implementation)
+================================================================
 
 QWEN 모델을 GRPO 알고리즘으로 학습시키는 트레이너입니다.
+EasyR1의 구현을 참조해서 개선된 GRPO 알고리즘을 적용합니다.
 
-핵심 아이디어:
-- State: user_prompt + placeholder + 현재까지 생성된 토큰들
-- Action: placeholder에 추가할 다음 단어/토큰 선택
-- Environment: SD3로 이미지 생성
-- Reward: CLIP(original_user_prompt, generated_image)
-- Reference Model: 학습 전 QWEN 모델
+핵심 개선사항:
+- 정확한 GRPO advantage 계산 (그룹 내 정규화)
+- 적응형 KL Controller
+- 이중 클리핑 policy loss
+- 수치적 안정성 개선
 
-기반 코드: grpo-cartpole.ipynb
+기반 코드: EasyR1 verl/trainer/core_algos.py
 
 Author: AI Assistant
 Date: 2025-01-22
@@ -22,28 +22,86 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Categorical
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Literal
 import numpy as np
 import logging
 import copy
+import os
+import json
+from datetime import datetime
 from dataclasses import dataclass
+from collections import defaultdict
+from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
+# ===============================
+# KL Controllers (from EasyR1)
+# ===============================
+
+class KLController(ABC):
+    """KL coefficient controller base class"""
+    kl_coef: float
+
+    @abstractmethod
+    def update(self, current_kl: float, n_steps: int):
+        """Update kl_coef according to current KL."""
+        ...
+
+class AdaptiveKLController(KLController):
+    """Adaptive KL controller from EasyR1"""
+
+    def __init__(self, init_kl_coef: float, target_kl: float, horizon: float):
+        self.kl_coef = init_kl_coef
+        self.target = target_kl
+        self.horizon = horizon
+
+    def update(self, current_kl: float, n_steps: int):
+        target = self.target
+        proportional_error = np.clip(current_kl / target - 1, -0.2, 0.2)
+        mult = 1 + proportional_error * n_steps / self.horizon
+        self.kl_coef *= mult
+
+class FixedKLController(KLController):
+    """Fixed KL controller from EasyR1"""
+
+    def __init__(self, init_kl_coef: float):
+        self.kl_coef = init_kl_coef
+
+    def update(self, current_kl: float, n_steps: int):
+        pass
+
+# ===============================
+# Enhanced GRPO Config
+# ===============================
+
 @dataclass
 class GRPOConfig:
-    """GRPO 학습 설정"""
+    """Enhanced GRPO 학습 설정 (EasyR1 기반)"""
     # 학습 파라미터
-    learning_rate: float = 1e-5
+    learning_rate: float = 1e-6  # 더 안정적인 학습률
     group_size: int = 4              # 그룹당 rollout 수
     num_iterations: int = 100        # 전체 학습 iteration
     grpo_epochs: int = 3             # 각 iteration당 최적화 epoch
     
     # GRPO 하이퍼파라미터
     gamma: float = 0.99              # 할인 팩터
-    grpo_kl_beta: float = 0.01       # KL 발산 페널티
-    grpo_clip_epsilon: float = 0.2   # 클리핑 파라미터
+    
+    # KL 제어
+    kl_type: str = "adaptive"        # "adaptive" or "fixed"
+    kl_coef: float = 0.02            # 초기 KL 계수
+    kl_target: float = 0.01          # 목표 KL (adaptive용)
+    kl_horizon: float = 1000         # KL 적응 horizon
+    kl_penalty: str = "kl"          # "kl", "abs", "mse", "low_var_kl", "full"
+    
+    # Policy 클리핑 (이중 클리핑)
+    clip_ratio_low: float = 0.2      # 하한 클리핑
+    clip_ratio_high: float = 0.2     # 상한 클리핑  
+    clip_ratio_dual: float = 4.0     # 이중 클리핑
+    
+    # 기타
     entropy_coeff: float = 0.01      # 엔트로피 보너스
+    max_grad_norm: float = 1.0       # 그래디언트 클리핑
     
     # 토큰 생성 파라미터
     max_new_tokens: int = 10         # placeholder에 추가할 최대 토큰 수
@@ -51,15 +109,44 @@ class GRPOConfig:
     
     # 시스템 설정
     device: str = "cuda"
-    epsilon_std: float = 1e-8        # 수치 안정성
+    epsilon_std: float = 1e-6        # 수치 안정성
+    loss_avg_mode: str = "token"     # "token" or "seq"
+    
+    # 저장 설정
+    save_training_data: bool = True  # 학습 데이터 저장 여부
+    save_dir: str = "training_results"  # 저장 디렉토리
+
+# ===============================
+# Utility Functions (from EasyR1)
+# ===============================
+
+def masked_mean(values: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Compute masked mean"""
+    return (values * mask).sum() / (mask.sum() + eps)
+
+def masked_whiten(values: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Whiten values with mask"""
+    values_masked = values * mask
+    mean = masked_mean(values_masked, mask, eps)
+    var = masked_mean((values_masked - mean) ** 2, mask, eps)
+    return (values_masked - mean) / (var.sqrt() + eps)
+
+def average_loss(values: torch.Tensor, mask: torch.Tensor, mode: str = "token", eps: float = 1e-8) -> torch.Tensor:
+    """Average the loss"""
+    if mode == "token":
+        return masked_mean(values, mask, eps=eps)
+    elif mode == "seq":
+        return ((values * mask).sum(-1) / (mask.sum(-1) + eps)).mean()
+    else:
+        raise NotImplementedError(f"Unknown mode: {mode}.")
+
+# ===============================
+# Enhanced Prompt Environment
+# ===============================
 
 class PromptEnvironment:
     """
-    프롬프트 생성 환경
-    
-    - State: user_prompt + placeholder + generated_tokens
-    - Action: 다음 단어 선택
-    - Reward: CLIP similarity
+    향상된 프롬프트 생성 환경 (EasyR1 기반)
     """
     
     def __init__(self, qwen_model, sd3_generator, clip_calculator, config: GRPOConfig):
@@ -72,134 +159,163 @@ class PromptEnvironment:
         self.tokenizer = qwen_model.tokenizer
         self.vocab_size = len(self.tokenizer)
         
-        # 자유로운 토큰 생성을 위한 어휘 설정
-        # 전체 vocabulary에서 일부를 선택 (너무 크면 메모리 문제)
-        self.vocab_size = len(self.tokenizer)
-        
-        # 유용한 토큰들을 필터링 (특수 토큰, 너무 짧은 토큰 제외)
+        # 유용한 토큰들을 필터링
         self.useful_token_ids = []
-        for token_id in range(min(10000, self.vocab_size)):  # 처음 10k 토큰만 사용
+        for token_id in range(min(10000, self.vocab_size)):
             token_text = self.tokenizer.decode([token_id]).strip()
             
-            # 필터링 조건
-            if (len(token_text) >= 2 and  # 2글자 이상
-                token_text.isalpha() and  # 알파벳만
-                not token_text.startswith('<') and  # 특수 토큰 제외
+            if (len(token_text) >= 2 and  
+                token_text.isalpha() and  
+                not token_text.startswith('<') and  
                 not token_text.startswith('[') and
                 token_id not in [self.tokenizer.pad_token_id, self.tokenizer.eos_token_id]):
                 self.useful_token_ids.append(token_id)
         
         self.action_space_size = len(self.useful_token_ids)
         
-        logger.info(f"🎮 Environment initialized with {self.action_space_size} useful tokens (unrestricted vocabulary)")
+        # 저장 관련 변수 초기화
+        self.current_iteration = 0
+        self.current_rollout = 0
+        self.current_step = 0
+        
+        logger.info(f"🎮 Enhanced Environment initialized with {self.action_space_size} useful tokens")
+    
+    def set_iteration_info(self, iteration: int, rollout: int):
+        """현재 iteration과 rollout 정보 설정"""
+        self.current_iteration = iteration
+        self.current_rollout = rollout
+        self.current_step = 0
     
     def reset(self, user_prompt: str) -> torch.Tensor:
-        """
-        환경 리셋 - 새로운 user prompt로 시작
-        
-        Returns:
-            초기 state (user_prompt + base_placeholder의 임베딩)
-        """
+        """환경 리셋"""
         self.user_prompt = user_prompt
-        
-        # 기본 placeholder 추가
         base_placeholder = ", high quality, detailed"
         self.current_prompt = user_prompt + base_placeholder
         
-        # 현재 상태를 토큰 ID로 변환 (CPU에서 처리)
         self.current_token_ids = self.tokenizer.encode(
             self.current_prompt, 
             add_special_tokens=False,
             return_tensors="pt"
         ).squeeze(0)
         
-        # State는 현재 프롬프트의 마지막 몇 토큰의 임베딩
+        self.current_step = 0
         state = self._get_state()
-        
         return state
     
     def _get_state(self) -> torch.Tensor:
-        """
-        현재 상태 반환 (현재 프롬프트의 임베딩)
-        """
-        # 마지막 몇 토큰만 사용 (메모리 효율성)
+        """현재 상태 반환 (향상된 수치적 안정성)"""
         max_state_tokens = 20
         if len(self.current_token_ids) > max_state_tokens:
             state_token_ids = self.current_token_ids[-max_state_tokens:]
         else:
             state_token_ids = self.current_token_ids
         
-        # 토큰 ID를 올바른 장치로 이동
         device = next(self.qwen_model.model.parameters()).device
         state_token_ids = state_token_ids.to(device)
         
-        # 토큰 임베딩으로 변환
         with torch.no_grad():
             embeddings = self.qwen_model.model.get_input_embeddings()(state_token_ids.unsqueeze(0))
-            # 평균 풀링으로 고정 크기 state 생성
-            state = embeddings.mean(dim=1).squeeze(0)  # [hidden_size]
+            state = embeddings.mean(dim=1).squeeze(0)
+            
+            # 수치적 안정성을 위한 정규화
+            state = F.normalize(state, dim=-1, eps=self.config.epsilon_std)
         
         return state
     
     def step(self, action: int) -> Tuple[torch.Tensor, float, bool]:
-        """
-        액션 실행
-        
-        Args:
-            action: 선택된 품질 토큰 인덱스
-            
-        Returns:
-            next_state, reward, done
-        """
-        # 액션을 토큰 ID로 변환
+        """액션 실행 (개선된 보상 계산)"""
         if action < len(self.useful_token_ids):
             selected_token_id = self.useful_token_ids[action]
         else:
-            selected_token_id = self.useful_token_ids[0]  # 폴백
+            selected_token_id = self.useful_token_ids[0]
         
-        # 토큰을 텍스트로 변환하여 프롬프트에 추가
         selected_token_text = self.tokenizer.decode([selected_token_id])
         self.current_prompt += " " + selected_token_text.strip()
         
-        # 토큰 ID 업데이트 (CPU에서 처리)
         self.current_token_ids = self.tokenizer.encode(
             self.current_prompt,
             add_special_tokens=False,
             return_tensors="pt"
         ).squeeze(0)
         
-        # 새로운 상태 계산
         next_state = self._get_state()
         
-        # 에피소드 종료 조건
         current_new_tokens = len(self.current_token_ids) - len(self.tokenizer.encode(
             self.user_prompt, add_special_tokens=False
         ))
         done = current_new_tokens >= self.config.max_new_tokens
         
-        # 보상 계산 (에피소드 끝에서만)
         if done:
             reward = self._calculate_reward()
         else:
-            reward = 0.0  # 중간 스텝에서는 보상 없음
+            reward = 0.0
         
+        self.current_step += 1
         return next_state, reward, done
     
-    def _calculate_reward(self) -> float:
-        """
-        CLIP을 사용한 보상 계산
+    def _save_step_data(self, original_image, enhanced_image, reward: float):
+        """스텝 데이터 저장"""
+        if not self.config.save_training_data:
+            return
         
-        중요: 원본 user_prompt와 생성된 이미지 간의 유사도만 계산!
-        """
         try:
-            # SD3로 이미지 생성 (현재 향상된 프롬프트 사용)
-            image = self.sd3_generator.generate_image(self.current_prompt)
+            step_dir = os.path.join(
+                self.config.save_dir,
+                f"iteration_{self.current_iteration:03d}",
+                f"rollout_{self.current_rollout:02d}",
+                f"step_{self.current_step:02d}"
+            )
+            os.makedirs(step_dir, exist_ok=True)
             
-            if image is None:
+            with open(os.path.join(step_dir, "original_prompt.txt"), "w", encoding="utf-8") as f:
+                f.write(self.user_prompt)
+            
+            with open(os.path.join(step_dir, "enhanced_prompt.txt"), "w", encoding="utf-8") as f:
+                f.write(self.current_prompt)
+            
+            if original_image is not None:
+                original_image.save(os.path.join(step_dir, "original_image.png"))
+            
+            if enhanced_image is not None:
+                enhanced_image.save(os.path.join(step_dir, "enhanced_image.png"))
+            
+            metadata = {
+                "iteration": self.current_iteration,
+                "rollout": self.current_rollout,
+                "step": self.current_step,
+                "original_prompt": self.user_prompt,
+                "enhanced_prompt": self.current_prompt,
+                "reward": reward,
+                "timestamp": datetime.now().isoformat(),
+                "tokens_added": len(self.current_token_ids) - len(self.tokenizer.encode(self.user_prompt, add_special_tokens=False))
+            }
+            
+            with open(os.path.join(step_dir, "metadata.json"), "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            
+            logger.debug(f"💾 Saved step data to {step_dir}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to save step data: {e}")
+    
+    def _calculate_reward(self) -> float:
+        """CLIP을 사용한 보상 계산"""
+        try:
+            logger.debug(f"🖼️ Generating original image with: '{self.user_prompt}'")
+            original_image = self.sd3_generator.generate_image(self.user_prompt)
+            
+            logger.debug(f"🖼️ Generating enhanced image with: '{self.current_prompt[:50]}...'")
+            enhanced_image = self.sd3_generator.generate_image(self.current_prompt)
+            
+            if original_image is None and enhanced_image is None:
                 return 0.0
             
-            # CLIP 보상 계산 (원본 user_prompt 사용!)
-            reward = self.clip_calculator.calculate_reward(self.user_prompt, image)
+            if enhanced_image is not None:
+                reward = self.clip_calculator.calculate_reward(self.user_prompt, enhanced_image)
+            else:
+                reward = 0.0
+            
+            self._save_step_data(original_image, enhanced_image, reward)
             
             logger.debug(f"🎯 Reward: {reward:.3f} for '{self.user_prompt}' -> '{self.current_prompt[:50]}...'")
             return reward
@@ -214,15 +330,17 @@ class PromptEnvironment:
     def get_state_dimension(self) -> int:
         return self.qwen_model.model.config.hidden_size
 
+# ===============================
+# Enhanced GRPO Trainer
+# ===============================
+
 class GRPOTrainer:
     """
-    QWEN 모델을 위한 GRPO 트레이너
-    
-    CartPole GRPO 코드를 기반으로 텍스트 생성에 적용
+    향상된 GRPO 트레이너 (EasyR1 기반)
     """
     
     def __init__(self, qwen_model, sd3_generator, clip_calculator, config: GRPOConfig):
-        self.qwen_model = qwen_model  # 학습할 정책 네트워크
+        self.qwen_model = qwen_model
         self.sd3_generator = sd3_generator
         self.clip_calculator = clip_calculator
         self.config = config
@@ -236,8 +354,7 @@ class GRPOTrainer:
         else:
             self.device = torch.device(config.device)
         
-        # 정책 네트워크 (QWEN 모델을 액션 확률 분포 출력하도록 어댑터 추가)
-        # QWEN 모델과 같은 데이터 타입 사용
+        # 정책 네트워크 (수치적 안정성 개선)
         qwen_dtype = next(self.qwen_model.model.parameters()).dtype
         self.action_head = nn.Linear(
             self.env.get_state_dimension(),
@@ -245,31 +362,164 @@ class GRPOTrainer:
             dtype=qwen_dtype
         ).to(self.device)
         
-        # 옵티마이저 (QWEN 모델 + 액션 헤드 함께 학습)
-        self.optimizer = optim.Adam(
+        # 가중치 초기화
+        nn.init.xavier_uniform_(self.action_head.weight)
+        nn.init.zeros_(self.action_head.bias)
+        
+        # 옵티마이저 (개선된 설정)
+        self.optimizer = optim.AdamW(
             list(self.qwen_model.model.parameters()) + list(self.action_head.parameters()),
-            lr=config.learning_rate
+            lr=config.learning_rate,
+            eps=1e-8,
+            weight_decay=1e-6,
+            betas=(0.9, 0.95)  # 더 안정적인 베타 값
         )
+        
+        # KL Controller 초기화
+        self.kl_controller = self._get_kl_controller()
+        
+        # Reference model (frozen)
+        self.ref_model = copy.deepcopy(self.qwen_model.model)
+        self.ref_model.eval()
+        for param in self.ref_model.parameters():
+            param.requires_grad = False
         
         # 학습 통계
         self.iteration_rewards = []
         self.iteration_policy_losses = []
         self.iteration_entropies = []
         self.iteration_kl_divs = []
+        self.current_iteration = 0
         
-        logger.info(f"🚀 GRPO Trainer initialized for QWEN model")
+        logger.info(f"🚀 Enhanced GRPO Trainer initialized with KL type: {config.kl_type}")
+    
+    def _get_kl_controller(self) -> KLController:
+        """KL Controller 생성"""
+        if self.config.kl_type == "fixed":
+            return FixedKLController(init_kl_coef=self.config.kl_coef)
+        elif self.config.kl_type == "adaptive":
+            return AdaptiveKLController(
+                init_kl_coef=self.config.kl_coef,
+                target_kl=self.config.kl_target,
+                horizon=self.config.kl_horizon,
+            )
+        else:
+            raise ValueError(f"Unknown kl type: {self.config.kl_type}.")
     
     def get_action_distribution(self, state: torch.Tensor) -> Categorical:
-        """
-        상태에서 액션 확률 분포 계산
-        """
-        # 상태 텐서를 action_head와 같은 데이터 타입으로 변환
+        """상태에서 액션 확률 분포 계산 (수치적 안정성 개선)"""
         state = state.to(dtype=self.action_head.weight.dtype)
-        
-        # QWEN 모델의 hidden state에서 액션 로짓 계산
         action_logits = self.action_head(state)
+        
+        # NaN 및 무한값 처리
+        if torch.isnan(action_logits).any() or torch.isinf(action_logits).any():
+            logger.warning("⚠️ NaN or Inf detected in action logits, using uniform distribution")
+            action_logits = torch.zeros_like(action_logits)
+        
+        # 로짓 클리핑 (더 강한 클리핑)
+        action_logits = torch.clamp(action_logits, min=-20.0, max=20.0)
+        
         return Categorical(logits=action_logits)
     
+    @torch.no_grad()
+    def compute_grpo_outcome_advantage(
+        self, token_level_rewards: torch.Tensor, response_mask: torch.Tensor, 
+        index: torch.Tensor, eps: float = 1e-6
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        EasyR1 스타일 GRPO advantage 계산
+        같은 프롬프트의 여러 rollout을 그룹화해서 정규화
+        """
+        scores = token_level_rewards.sum(dim=-1)
+        id2score = defaultdict(list)
+        id2mean, id2std = {}, {}
+
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i].item()].append(scores[i])
+
+        for idx in id2score:
+            if len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
+                id2std[idx] = torch.std(torch.stack(id2score[idx]))
+            else:
+                # 단일 샘플인 경우 0으로 설정
+                id2mean[idx] = scores[0].clone()  # 임시값
+                id2std[idx] = torch.tensor(1.0, device=scores.device)
+
+        for i in range(bsz):
+            if len(id2score[index[i].item()]) > 1:
+                scores[i] = (scores[i] - id2mean[index[i].item()]) / (id2std[index[i].item()] + eps)
+            else:
+                scores[i] = 0.0  # 단일 샘플은 advantage 0
+
+        returns = scores.unsqueeze(-1) * response_mask
+        return returns, returns
+    
+    def compute_kl(self, log_probs: torch.Tensor, ref_log_probs: torch.Tensor) -> torch.Tensor:
+        """KL divergence 계산 (EasyR1 스타일)"""
+        log_probs, ref_log_probs = log_probs.float(), ref_log_probs.float()
+        
+        if self.config.kl_penalty == "kl":
+            return log_probs - ref_log_probs
+        elif self.config.kl_penalty == "abs":
+            return (log_probs - ref_log_probs).abs()
+        elif self.config.kl_penalty == "mse":
+            return 0.5 * (log_probs - ref_log_probs).square()
+        elif self.config.kl_penalty == "low_var_kl":
+            kl = (ref_log_probs - log_probs).clamp(-20.0, 20.0)
+            kld = (kl.exp() - kl - 1).contiguous()
+            return torch.clamp(kld, min=-10.0, max=10.0)
+        elif self.config.kl_penalty == "full":
+            return F.kl_div(ref_log_probs, log_probs, log_target=True, reduction="none").sum(-1)
+        else:
+            raise NotImplementedError(f"Unknown KL penalty: {self.config.kl_penalty}.")
+    
+    def compute_policy_loss(
+        self, old_log_probs: torch.Tensor, log_probs: torch.Tensor,
+        advantages: torch.Tensor, response_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        EasyR1 스타일 이중 클리핑 policy loss 계산
+        """
+        negative_approx_kl = log_probs - old_log_probs
+        # KL 클리핑으로 수치적 안정성 확보
+        negative_approx_kl = torch.clamp(negative_approx_kl, -20.0, 20.0)
+        ratio = torch.exp(negative_approx_kl)
+        
+        # 클리핑된 ratio 계산
+        clipped_ratio = torch.exp(
+            torch.clamp(
+                negative_approx_kl, 
+                np.log(1.0 - self.config.clip_ratio_low), 
+                np.log(1.0 + self.config.clip_ratio_high)
+            )
+        )
+
+        # Metrics 계산
+        metrics = {"ppo_kl": masked_mean(-negative_approx_kl, response_mask).item()}
+        metrics["entropy_loss"] = average_loss(-log_probs, response_mask, mode=self.config.loss_avg_mode).item()
+
+        # 3가지 loss 계산
+        pg_loss = -advantages * ratio
+        pg_loss2 = -advantages * clipped_ratio
+        pg_loss3 = -advantages * self.config.clip_ratio_dual
+
+        # 이중 클리핑 적용
+        clipped_pg_loss_higher = torch.max(pg_loss, pg_loss2)
+        metrics["pg_clipfrac_higher"] = masked_mean((pg_loss < pg_loss2).float(), response_mask).item()
+        
+        clipped_pg_loss_lower = torch.min(clipped_pg_loss_higher, pg_loss3)
+        final_pg_loss = torch.where(advantages < 0, clipped_pg_loss_lower, clipped_pg_loss_higher)
+        metrics["pg_clipfrac_lower"] = masked_mean(
+            (clipped_pg_loss_higher > pg_loss3).float() * (advantages < 0).float(), 
+            response_mask
+        ).item()
+
+        final_pg_loss = average_loss(final_pg_loss, response_mask, mode=self.config.loss_avg_mode)
+        
+        return final_pg_loss, metrics
+
     def collect_group_trajectories(self, user_prompts: List[str]) -> Dict[str, Any]:
         """
         그룹 궤적 수집 (CartPole 코드 기반)
@@ -293,6 +543,9 @@ class GRPOTrainer:
             rollout_actions = []
             rollout_log_probs = []
             rollout_rewards = []
+            
+            # 현재 iteration과 rollout 정보 설정
+            self.env.set_iteration_info(getattr(self, 'current_iteration', 0), rollout_idx)
             
             # 환경 리셋
             state = self.env.reset(user_prompt)
