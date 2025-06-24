@@ -23,4 +23,4 @@ echo "MASTER_ADDR="$MASTER_ADDR
 
 #conda activate torch-env
 # srun accelerate launch --multi_gpu --mixed_precision=fp16 --num_machines=1 --num_processes=8 --machine_rank=0 --main_process_port=29600 advanced_dit_repa_training.py
-python run_multi_gpu_training.py
+python main.py
