@@ -543,9 +543,21 @@ class QWENModel:
         else:
             rewards = torch.tensor(rewards, device=self.device, dtype=torch.float16)
         
-        # 그룹 평균을 baseline으로 사용 (GRPO 방식)
-        baseline = rewards.mean()
-        advantages = rewards - baseline
+        # Group-relative advantage 사용 (main.py에서 계산됨)
+        advantages = []
+        for exp in experiences:
+            if 'group_advantage' in exp:
+                advantages.append(exp['group_advantage'])
+            else:
+                # fallback: 기존 방식
+                advantages.append(exp['reward'] - rewards.mean().item())
+        
+        if self.device == "accelerate":
+            advantages = torch.tensor(advantages, dtype=torch.float16)
+        else:
+            advantages = torch.tensor(advantages, device=self.device, dtype=torch.float16)
+        
+        baseline = rewards.mean()  # 로깅용
         
         # 현재 모델과 참조 모델의 로그 확률 계산
         current_log_probs = []

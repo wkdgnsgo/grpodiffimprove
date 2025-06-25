@@ -144,7 +144,7 @@ class SimpleGRPOTrainer:
         return enhanced_data
     
     def generate_images(self, enhanced_prompts: List[str]) -> List:
-        """이미지 생성 (GPU 2에서 실행)"""
+        """이미지 생성 (GPU 2에서 실행) - 단일 처리"""
         logger.info(f"🎨 이미지 생성 ({len(enhanced_prompts)}개)")
         
         images = []
@@ -170,8 +170,43 @@ class SimpleGRPOTrainer:
         logger.info(f"✅ {len(images)}개 이미지 생성 완료")
         return images
     
+    def generate_images_batch(self, enhanced_prompts: List[str]) -> List:
+        """배치 이미지 생성 (GPU 2에서 실행) - 배치 최적화"""
+        logger.info(f"🎨 배치 이미지 생성 ({len(enhanced_prompts)}개)")
+        
+        images = []
+        
+        try:
+            # SD3는 배치 처리를 지원하지만 메모리 절약을 위해 개별 처리
+            for i, prompt in enumerate(enhanced_prompts):
+                try:
+                    result = self.sd_pipeline(
+                        prompt=prompt,
+                        num_inference_steps=28,
+                        guidance_scale=7.0,
+                        height=1024,
+                        width=1024
+                    )
+                    image = result.images[0]
+                    images.append(image)
+                    logger.info(f"  배치 이미지 {i+1}/{len(enhanced_prompts)} 생성 완료")
+                except Exception as e:
+                    logger.error(f"  배치 이미지 {i+1} 생성 실패: {e}")
+                    # 더미 이미지 추가
+                    from PIL import Image
+                    images.append(Image.new('RGB', (1024, 1024), color='black'))
+        
+        except Exception as e:
+            logger.error(f"❌ 배치 이미지 생성 전체 실패: {e}")
+            # 전체 실패시 더미 이미지들
+            from PIL import Image
+            images = [Image.new('RGB', (1024, 1024), color='black') for _ in enhanced_prompts]
+        
+        logger.info(f"✅ 배치 {len(images)}개 이미지 생성 완료")
+        return images
+    
     def calculate_rewards(self, user_prompt: str, enhanced_prompts: List[str], images: List) -> List[float]:
-        """리워드 계산 (GPU 1에서 실행)"""
+        """리워드 계산 (GPU 1에서 실행) - 단일 처리"""
         logger.info(f"🎯 리워드 계산 ({len(images)}개)")
         
         rewards = []
@@ -191,12 +226,54 @@ class SimpleGRPOTrainer:
         logger.info(f"✅ 리워드 계산 완료 - 평균: {avg_reward:.4f}")
         return rewards
     
+    def calculate_rewards_batch(self, user_prompt: str, enhanced_prompts: List[str], images: List) -> List[float]:
+        """배치 리워드 계산 (GPU 1에서 실행) - original user prompt 사용"""
+        logger.info(f"🎯 배치 리워드 계산 ({len(images)}개) - Original User Prompt 사용")
+        logger.info(f"📝 사용된 Original Prompt: '{user_prompt}'")
+        
+        try:
+            # CLIP 배치 처리 사용 - original user prompt로 계산
+            rewards = self.reward_model.calculate_batch_rewards(
+                user_prompt,  # ⭐ 중요: original user prompt 사용 (enhanced 아님)
+                enhanced_prompts,
+                images
+            )
+            
+            avg_reward = sum(rewards) / len(rewards) if rewards else 0.0
+            logger.info(f"✅ 배치 리워드 계산 완료 - 평균: {avg_reward:.4f}")
+            logger.info(f"🔍 CLIP 유사도는 Original User Prompt '{user_prompt}'와 생성된 이미지 간 계산됨")
+            
+            return rewards
+            
+        except Exception as e:
+            logger.error(f"❌ 배치 리워드 계산 실패: {e}")
+            # 에러 시 개별 계산으로 fallback
+            logger.info("🔄 개별 리워드 계산으로 fallback")
+            return self.calculate_rewards(user_prompt, enhanced_prompts, images)
+    
     def collect_rollouts(self, prompts: List[str]) -> List[Dict]:
-        """롤아웃 수집"""
+        """배치 롤아웃 수집 (Group-relative 방식)"""
         all_experiences = []
         
-        for prompt_idx, user_prompt in enumerate(prompts):
-            logger.info(f"\n📝 프롬프트 {prompt_idx + 1}/{len(prompts)}: '{user_prompt}'")
+        # 배치 단위로 처리
+        batch_size = min(len(prompts), self.config.batch_size)
+        
+        for batch_start in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[batch_start:batch_start + batch_size]
+            logger.info(f"\n📦 배치 {batch_start//batch_size + 1}: {len(batch_prompts)}개 프롬프트")
+            
+            batch_experiences = self.collect_batch_rollouts(batch_prompts)
+            all_experiences.extend(batch_experiences)
+        
+        logger.info(f"\n📊 총 수집된 경험: {len(all_experiences)}개")
+        return all_experiences
+    
+    def collect_batch_rollouts(self, batch_prompts: List[str]) -> List[Dict]:
+        """단일 배치 롤아웃 수집"""
+        batch_experiences = []
+        
+        for prompt_idx, user_prompt in enumerate(batch_prompts):
+            logger.info(f"📝 프롬프트 {prompt_idx + 1}/{len(batch_prompts)}: '{user_prompt}'")
             
             # 1단계: 향상된 프롬프트 생성 (GPU 0)
             enhanced_data = self.generate_enhanced_prompts(user_prompt, self.config.num_rollouts)
@@ -208,11 +285,11 @@ class SimpleGRPOTrainer:
             enhanced_prompts = [data[0] for data in enhanced_data]
             log_probs = [data[1] for data in enhanced_data]
             
-            # 2단계: 이미지 생성 (GPU 2)  
-            images = self.generate_images(enhanced_prompts)
+            # 2단계: 배치 이미지 생성 (GPU 2)  
+            images = self.generate_images_batch(enhanced_prompts)
             
-            # 3단계: 리워드 계산 (GPU 1)
-            rewards = self.calculate_rewards(user_prompt, enhanced_prompts, images)
+            # 3단계: 배치 리워드 계산 (GPU 1) - original user prompt 사용
+            rewards = self.calculate_rewards_batch(user_prompt, enhanced_prompts, images)
             
             # 경험 저장
             for enhanced_prompt, log_prob, reward in zip(enhanced_prompts, log_probs, rewards):
@@ -224,23 +301,113 @@ class SimpleGRPOTrainer:
                     'info': {
                         'original_prompt': user_prompt,
                         'enhanced_prompt': enhanced_prompt,
-                        'original_reward': reward,
-                        'enhanced_reward': reward
+                        'clip_reward': reward  # CLIP은 original user prompt로 계산됨
                     }
                 }
-                all_experiences.append(experience)
+                batch_experiences.append(experience)
         
-        logger.info(f"\n📊 총 수집된 경험: {len(all_experiences)}개")
-        return all_experiences
+        return batch_experiences
     
     def update_policy(self, experiences: List[Dict]) -> Dict:
-        """정책 업데이트 (GPU 0에서 실행)"""
-        logger.info(f"🔄 정책 업데이트 ({len(experiences)}개 경험)")
+        """Group-relative 정책 업데이트 (GPU 0에서 실행)"""
+        logger.info(f"🔄 Group-relative 정책 업데이트 ({len(experiences)}개 경험)")
         
-        metrics = self.qwen_model.update_grpo_policy(experiences)
+        # Group-relative baseline 계산
+        group_baseline_metrics = self.calculate_group_relative_baseline(experiences)
         
-        logger.info(f"✅ 정책 업데이트 완료")
+        # 향상된 경험 데이터로 정책 업데이트
+        enhanced_experiences = self.apply_group_relative_advantages(experiences, group_baseline_metrics)
+        
+        # QWEN 모델 업데이트
+        metrics = self.qwen_model.update_grpo_policy(enhanced_experiences)
+        
+        # Group-relative 메트릭 추가
+        metrics.update(group_baseline_metrics)
+        
+        logger.info(f"✅ Group-relative 정책 업데이트 완료")
         return metrics
+    
+    def calculate_group_relative_baseline(self, experiences: List[Dict]) -> Dict:
+        """Group-relative baseline 계산"""
+        if not experiences:
+            return {}
+        
+        # 그룹별 리워드 수집
+        user_prompt_groups = {}
+        for exp in experiences:
+            user_prompt = exp['user_prompt']
+            if user_prompt not in user_prompt_groups:
+                user_prompt_groups[user_prompt] = []
+            user_prompt_groups[user_prompt].append(exp['reward'])
+        
+        # 그룹별 통계 계산
+        group_stats = {}
+        all_rewards = []
+        
+        for user_prompt, rewards in user_prompt_groups.items():
+            group_mean = sum(rewards) / len(rewards)
+            group_std = (sum((r - group_mean) ** 2 for r in rewards) / len(rewards)) ** 0.5
+            
+            group_stats[user_prompt] = {
+                'mean': group_mean,
+                'std': group_std,
+                'count': len(rewards),
+                'rewards': rewards
+            }
+            all_rewards.extend(rewards)
+        
+        # 전체 통계
+        global_mean = sum(all_rewards) / len(all_rewards)
+        global_std = (sum((r - global_mean) ** 2 for r in all_rewards) / len(all_rewards)) ** 0.5
+        
+        logger.info(f"📊 Group-relative Baseline 통계:")
+        logger.info(f"  전체 평균: {global_mean:.4f} ± {global_std:.4f}")
+        logger.info(f"  그룹 수: {len(group_stats)}")
+        
+        for prompt, stats in group_stats.items():
+            logger.info(f"  '{prompt[:30]}...': {stats['mean']:.4f} ± {stats['std']:.4f} (n={stats['count']})")
+        
+        return {
+            'global_mean': global_mean,
+            'global_std': global_std,
+            'group_stats': group_stats,
+            'num_groups': len(group_stats)
+        }
+    
+    def apply_group_relative_advantages(self, experiences: List[Dict], baseline_metrics: Dict) -> List[Dict]:
+        """Group-relative advantage 적용"""
+        if not baseline_metrics:
+            return experiences
+        
+        enhanced_experiences = []
+        group_stats = baseline_metrics['group_stats']
+        global_mean = baseline_metrics['global_mean']
+        
+        for exp in experiences:
+            user_prompt = exp['user_prompt']
+            reward = exp['reward']
+            
+            # Group-relative advantage 계산
+            if user_prompt in group_stats:
+                group_mean = group_stats[user_prompt]['mean']
+                group_advantage = reward - group_mean
+            else:
+                group_advantage = reward - global_mean
+            
+            # Global advantage도 계산
+            global_advantage = reward - global_mean
+            
+            # 경험 데이터에 advantage 정보 추가
+            enhanced_exp = exp.copy()
+            enhanced_exp['group_advantage'] = group_advantage
+            enhanced_exp['global_advantage'] = global_advantage
+            enhanced_exp['group_baseline'] = group_stats.get(user_prompt, {}).get('mean', global_mean)
+            enhanced_exp['global_baseline'] = global_mean
+            
+            enhanced_experiences.append(enhanced_exp)
+        
+        logger.info(f"✅ Group-relative advantage 적용 완료")
+        return enhanced_experiences
     
     def train(self, num_epochs: int = 5):
         """메인 학습 루프"""
