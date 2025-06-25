@@ -5,7 +5,7 @@
 #SBATCH --nodelist=hpc-pr-a-pod20
 #SBATCH --ntasks-per-node=1 # total number of tasks per node
 #SBATCH --cpus-per-task=8 # cpu-cores per task (멀티 GPU + 추론 모델 처리용)
-#SBATCH --gres=gpu:6 # 6개 GPU 필요 (QWEN 분산: 0-3, CLIP: 4, SD3: 5)
+#SBATCH --gres=gpu:4 # 4개 GPU 필요 (QWEN 분산: 0-1, CLIP: 2, SD3: 3)
 #SBATCH --time=10:00:00 # total run time limit (HH:MM:SS) - 멀티 GPU로 더 긴 학습
 #SBATCH --output=qwen_grpo_accelerate_training.out
 #SBATCH --error=qwen_grpo_accelerate_training.err
@@ -16,7 +16,7 @@
 # Accelerate 멀티 GPU 환경 변수 설정
 export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 export WORLD_SIZE=$(($SLURM_NNODES * SLURM_NTASKS_PER_NODE))
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+export CUDA_VISIBLE_DEVICES=2,3,4,5
 export TOKENIZERS_PARALLELISM=false
 export WANDB_DISABLED=true # WandB 비활성화 (선택사항)
 
@@ -32,17 +32,15 @@ echo "=== GPU 정보 ==="
 nvidia-smi
 echo ""
 
-# GPU 배치 정보 출력 (Accelerate 멀티 GPU)
-echo "=== GPU 배치 계획 (Accelerate 멀티 GPU) ==="
-echo "GPU 0-3: QWEN RL 학습 (Accelerate 분산 학습)"
-echo "  - GPU 0: QWEN 메인 모델 (1/4)"
-echo "  - GPU 1: QWEN 메인 모델 (2/4)"
-echo "  - GPU 2: QWEN 메인 모델 (3/4)"
-echo "  - GPU 3: QWEN 메인 모델 (4/4)"
-echo "GPU 4: CLIP + Reference 모델"
+# GPU 배치 정보 출력 (Accelerate 2-GPU)
+echo "=== GPU 배치 계획 (Accelerate 2-GPU - GPU 0 부담 감소) ==="
+echo "GPU 0-1: QWEN RL 학습 (Accelerate 분산 학습)"
+echo "  - GPU 0: QWEN 메인 모델 (1/2) - 메모리 제한 80%"
+echo "  - GPU 1: QWEN 메인 모델 (2/2) - 메모리 제한 90%"
+echo "GPU 2: CLIP + Reference 모델"
 echo "  - CLIP 리워드 모델 (리워드 계산)"
 echo "  - QWEN Reference 모델 (KL penalty)"
-echo "GPU 5: Stable Diffusion 3 (1개만 로딩)"
+echo "GPU 3: Stable Diffusion 3 (1개만 로딩)"
 echo "  - SD3 파이프라인 (이미지 생성 전용)"
 echo ""
 
@@ -55,12 +53,12 @@ compute_environment: LOCAL_MACHINE
 debug: false
 distributed_type: MULTI_GPU
 downcast_bf16: 'no'
-gpu_ids: '2,3,4,5,6,7'
+gpu_ids: '2,3,4,5'
 machine_rank: 0
 main_training_function: main
 mixed_precision: fp16
 num_machines: 1
-num_processes: 4
+num_processes: 2
 rdzv_backend: static
 same_network: true
 tpu_env: []

@@ -107,10 +107,10 @@ def main():
             logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
             logger.info(f"    메모리: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f}GB")
         
-        logger.info("\n🎯 GPU 배치 계획 (Accelerate 멀티 GPU):")
-        logger.info("  GPU 0-3: QWEN RL 학습 (Accelerate 분산 학습)")
-        logger.info("  GPU 4: CLIP + QWEN Reference (통합)")
-        logger.info("  GPU 5: Stable Diffusion 3 (이미지 생성 전용)")
+        logger.info("\n🎯 GPU 배치 계획 (Accelerate 2-GPU - GPU 0 부담 감소):")
+        logger.info("  GPU 0-1: QWEN RL 학습 (Accelerate 분산 학습)")
+        logger.info("  GPU 2: CLIP + QWEN Reference (통합)")
+        logger.info("  GPU 3: Stable Diffusion 3 (이미지 생성 전용)")
     else:
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
@@ -187,19 +187,19 @@ def main():
         
         # 메인 프로세스에서만 로딩
         if accelerator.is_main_process:
-            logger.info("🎯 메인 프로세스: 통합 모델들 로딩 (GPU 4번, 5번)")
+            logger.info("🎯 메인 프로세스: 통합 모델들 로딩 (GPU 2번, 3번)")
             
-            # CLIP 리워드 모델 (GPU 4번)
-            reward_model = CLIPReward(device="cuda:4")
-            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 4)")
+            # CLIP 리워드 모델 (GPU 2번)
+            reward_model = CLIPReward(device="cuda:2")
+            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 2)")
             
-            # Stable Diffusion 3 파이프라인 (GPU 5번) - 1개만 로딩
-            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:5")
-            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 5) - 1개만 로딩")
+            # Stable Diffusion 3 파이프라인 (GPU 3번) - 1개만 로딩
+            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:3")
+            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 3) - 1개만 로딩")
             
-            # QWEN Reference 모델은 이미 qwen.py에서 GPU 4번으로 설정됨
+            # QWEN Reference 모델은 이미 qwen.py에서 GPU 2번으로 설정됨
             if hasattr(qwen_model, 'ref_model') and qwen_model.ref_model is not None:
-                logger.info("✅ QWEN Reference 모델이 이미 GPU 4에 설정됨")
+                logger.info("✅ QWEN Reference 모델이 이미 GPU 2에 설정됨")
         else:
             # 서브 프로세스에서는 로딩하지 않음
             logger.info("🎯 서브 프로세스: 통합 모델들 로딩 건너뛰기")

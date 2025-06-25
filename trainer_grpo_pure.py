@@ -36,9 +36,9 @@ class QWENGRPOEnvironment:
         
         # GPU 디바이스 설정 (Accelerate 멀티 GPU 환경)
         self.qwen_device = "auto"         # Accelerate가 관리
-        self.sd_device = "cuda:4"         # SD3 (GPU 4번)
-        self.reward_device = "cuda:4"     # CLIP Reward (GPU 4번)
-        self.ref_device = "cuda:4"        # Reference model (GPU 4번)
+        self.sd_device = "cuda:3"         # SD3 (GPU 3번)
+        self.reward_device = "cuda:2"     # CLIP Reward (GPU 2번)
+        self.ref_device = "cuda:2"        # Reference model (GPU 2번)
         
         self.current_user_prompt = ""
         self.current_enhanced_prompt = ""
@@ -109,11 +109,11 @@ class QWENGRPOEnvironment:
             
             logger.info(f"✅ 사용된 프롬프트: '{enhanced_prompt[:50]}...'")
             
-            # 이미지 생성 시도 (GPU 5번)
+            # 이미지 생성 시도 (GPU 3번)
             try:
-                logger.info(f"🖼️  이미지 생성 시작 (GPU 5번 - SD3 전용)")
+                logger.info(f"🖼️  이미지 생성 시작 (GPU 3번 - SD3 전용)")
                 
-                with torch.cuda.device(5):
+                with torch.cuda.device(3):
                     # 원본 프롬프트로 이미지 생성
                     original_result = self.sd_pipeline(
                         prompt=self.current_user_prompt,
@@ -143,12 +143,12 @@ class QWENGRPOEnvironment:
                 original_image = Image.new('RGB', (1024, 1024), color='black')
                 enhanced_image = Image.new('RGB', (1024, 1024), color='black')
             
-            # 리워드 계산 시도 (GPU 4번)
+            # 리워드 계산 시도 (GPU 2번)
             try:
-                logger.info(f"🎯 리워드 계산 시작 (GPU 4번 - CLIP 전용)")
+                logger.info(f"🎯 리워드 계산 시작 (GPU 2번 - CLIP 전용)")
                 
-                # CLIP 리워드를 GPU 4에서 계산
-                with torch.cuda.device(4):
+                # CLIP 리워드를 GPU 2에서 계산
+                with torch.cuda.device(2):
                     enhanced_reward = self.reward_model.calculate_reward(
                         self.current_user_prompt,
                         self.current_enhanced_prompt,

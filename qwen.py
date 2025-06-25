@@ -136,8 +136,8 @@ class QWENModel:
             try:
                 # GPU 4번이 있으면 사용, 아니면 CPU 사용
                 if torch.cuda.device_count() > 4:
-                    ref_device = "cuda:4"
-                    logger.info("📍 Reference model을 GPU 4번으로 이동 (메인 프로세스)")
+                    ref_device = "cuda:2"
+                    logger.info("📍 Reference model을 GPU 2번으로 이동 (메인 프로세스)")
                 elif torch.cuda.device_count() > 3:
                     ref_device = "cuda:3"
                     logger.info("📍 Reference model을 GPU 3번으로 이동 (메인 프로세스)")
