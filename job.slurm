@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1 # total number of tasks per node
 #SBATCH --cpus-per-task=8 # cpu-cores per task (멀티 GPU + 추론 모델 처리용)
 #SBATCH --gres=gpu:6 # 6개 GPU 필요 (QWEN 분산: 0-3, CLIP: 4, SD3: 5)
-#SBATCH --time=16:00:00 # total run time limit (HH:MM:SS) - 멀티 GPU로 더 긴 학습
+#SBATCH --time=10:00:00 # total run time limit (HH:MM:SS) - 멀티 GPU로 더 긴 학습
 #SBATCH --output=qwen_grpo_accelerate_training.out
 #SBATCH --error=qwen_grpo_accelerate_training.err
 #SBATCH --mail-type=begin # send email when job begins

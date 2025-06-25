@@ -218,7 +218,11 @@ class QWENModel:
             return_tensors="pt", 
             padding=True, 
             truncation=True
-        ).to(self.device)
+        )
+        
+        # Accelerate 환경이 아닐 때만 명시적으로 디바이스 이동
+        if self.device != "accelerate":
+            inputs = inputs.to(self.device)
         
         # 생성
         with torch.no_grad():
@@ -274,7 +278,11 @@ class QWENModel:
             return_tensors="pt", 
             padding=True, 
             truncation=True
-        ).to(self.device)
+        )
+        
+        # Accelerate 환경이 아닐 때만 명시적으로 디바이스 이동
+        if self.device != "accelerate":
+            inputs = inputs.to(self.device)
         
         # Semantic filtering 제거 - GRPO가 직접 exploration과 exploitation 균형을 학습
         # 다양한 후보 생성을 위해 더 많은 시도
@@ -350,7 +358,11 @@ class QWENModel:
             return_tensors="pt", 
             padding=True, 
             truncation=True
-        ).to(self.device)
+        )
+        
+        # Accelerate 환경이 아닐 때만 명시적으로 디바이스 이동
+        if self.device != "accelerate":
+            inputs = inputs.to(self.device)
         
         # 히든 스테이트 추출 (QWEN 모델도 학습되도록 gradient 계산)
         outputs = self.model(
@@ -397,7 +409,11 @@ class QWENModel:
             return_tensors="pt", 
             padding=True, 
             truncation=True
-        ).to(self.device)
+        )
+        
+        # Accelerate 환경이 아닐 때만 명시적으로 디바이스 이동
+        if self.device != "accelerate":
+            inputs = inputs.to(self.device)
         
         # QWEN 모델로 직접 생성 (gradient 계산)
         outputs = self.model.generate(
@@ -428,7 +444,10 @@ class QWENModel:
             avg_log_prob = torch.stack(log_probs).mean()
         else:
             # fallback: 더미 로그 확률
-            avg_log_prob = torch.tensor(0.0, device=self.device)
+            if self.device == "accelerate":
+                avg_log_prob = torch.tensor(0.0)  # Accelerate가 디바이스 관리
+            else:
+                avg_log_prob = torch.tensor(0.0, device=self.device)
         
         return enhanced_prompt, avg_log_prob
 
@@ -436,7 +455,10 @@ class QWENModel:
         """참조 모델의 로그 확률 계산 (메모리 최적화 버전)"""
         # Reference model이 없으면 더미 값 반환
         if self.ref_model is None:
-            return torch.tensor(0.0, device=self.device, dtype=torch.float16)
+            if self.device == "accelerate":
+                return torch.tensor(0.0, dtype=torch.float16)  # Accelerate가 디바이스 관리
+            else:
+                return torch.tensor(0.0, device=self.device, dtype=torch.float16)
         
         # VLM에 입력할 메시지 구성
         messages = [
@@ -503,7 +525,10 @@ class QWENModel:
         
         # 텐서로 변환
         old_log_probs = torch.stack(old_log_probs).half()
-        rewards = torch.tensor(rewards, device=self.device, dtype=torch.float16)
+        if self.device == "accelerate":
+            rewards = torch.tensor(rewards, dtype=torch.float16)  # Accelerate가 디바이스 관리
+        else:
+            rewards = torch.tensor(rewards, device=self.device, dtype=torch.float16)
         
         # 그룹 평균을 baseline으로 사용 (GRPO 방식)
         baseline = rewards.mean()
@@ -537,8 +562,12 @@ class QWENModel:
             kl_div = (current_log_probs - ref_log_probs).mean()
             kl_penalty = self.grpo_config.kl_coef * kl_div
         else:
-            kl_div = torch.tensor(0.0, device=self.device)
-            kl_penalty = torch.tensor(0.0, device=self.device)
+            if self.device == "accelerate":
+                kl_div = torch.tensor(0.0)  # Accelerate가 디바이스 관리
+                kl_penalty = torch.tensor(0.0)
+            else:
+                kl_div = torch.tensor(0.0, device=self.device)
+                kl_penalty = torch.tensor(0.0, device=self.device)
         
         # 총 손실 (엔트로피는 QWEN 자체에서 제공)
         total_loss = policy_loss + kl_penalty

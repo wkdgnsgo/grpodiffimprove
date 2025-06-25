@@ -264,7 +264,8 @@ def main():
         
         # 베이스라인 값을 모든 프로세스에 브로드캐스트
         if accelerator.num_processes > 1:
-            avg_baseline = accelerator.gather(torch.tensor(avg_baseline))[0].item()
+            avg_baseline_tensor = torch.tensor(avg_baseline, device=accelerator.device)
+            avg_baseline = accelerator.gather(avg_baseline_tensor)[0].item()
         
         # 메모리 정리
         if torch.cuda.is_available():
