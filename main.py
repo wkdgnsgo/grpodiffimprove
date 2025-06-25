@@ -899,8 +899,31 @@ class SimpleGRPOTrainer:
                     logger.warning(f"⚠️ 에포크 {epoch + 1}: 경험 없음, 건너뛰기")
                     continue
                 
-                # 정책 업데이트
-                metrics = self.update_policy(experiences)
+                # 정책 업데이트 (그라디언트 업데이트 포함)
+                try:
+                    logger.info(f"🔄 에포크 {epoch + 1}: 정책 업데이트 시작...")
+                    metrics = self.update_policy(experiences)
+                    logger.info(f"✅ 에포크 {epoch + 1}: 정책 업데이트 완료")
+                    
+                except Exception as update_error:
+                    logger.error(f"💥 에포크 {epoch + 1}: 그라디언트 업데이트 중 치명적 오류 발생!")
+                    logger.error(f"🚨 오류 내용: {update_error}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # 모델 상태 저장 시도
+                    try:
+                        emergency_save_path = os.path.join(self.log_dir, f"emergency_save_epoch_{epoch + 1}")
+                        os.makedirs(emergency_save_path, exist_ok=True)
+                        self.qwen_model.save_lora_model(emergency_save_path)
+                        logger.info(f"💾 응급 모델 저장 완료: {emergency_save_path}")
+                    except Exception as save_error:
+                        logger.error(f"❌ 응급 모델 저장 실패: {save_error}")
+                    
+                    # 학습 종료
+                    logger.error(f"🛑 그라디언트 업데이트 오류로 인한 학습 조기 종료 (에포크 {epoch + 1}/{num_epochs})")
+                    logger.info(f"📊 완료된 에포크: {epoch}/{num_epochs}")
+                    break  # 학습 루프 종료
                 
                 # 에포크 시간 기록
                 epoch_time = time.time() - epoch_start_time
@@ -927,12 +950,38 @@ class SimpleGRPOTrainer:
                 logger.info(f"⏱️ 에포크 {epoch + 1} 완료 시간: {epoch_time:.2f}초")
                 
             except Exception as e:
-                logger.error(f"❌ 에포크 {epoch + 1} 실패: {e}")
+                logger.error(f"❌ 에포크 {epoch + 1} 일반 오류: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
         
+        # 최종 모델 저장
+        try:
+            final_save_path = os.path.join(self.log_dir, "final_model")
+            os.makedirs(final_save_path, exist_ok=True)
+            self.qwen_model.save_lora_model(final_save_path)
+            logger.info(f"💾 최종 모델 저장 완료: {final_save_path}")
+        except Exception as save_error:
+            logger.error(f"❌ 최종 모델 저장 실패: {save_error}")
+        
+        # 학습 완료 요약
+        total_epochs_completed = len(self.training_metrics['epoch_rewards'])
+        total_training_time = sum(self.training_metrics['epoch_times']) if self.training_metrics['epoch_times'] else 0
+        
         logger.info("🎉 Simple GRPO 학습 완료!")
+        logger.info("=" * 60)
+        logger.info("📊 학습 요약:")
+        logger.info(f"  완료된 에포크: {total_epochs_completed}/{num_epochs}")
+        logger.info(f"  총 학습 시간: {total_training_time:.2f}초 ({total_training_time/60:.1f}분)")
+        
+        if self.training_metrics['epoch_rewards']:
+            avg_reward = sum(self.training_metrics['epoch_rewards']) / len(self.training_metrics['epoch_rewards'])
+            best_reward = max(self.training_metrics['epoch_rewards'])
+            logger.info(f"  평균 리워드: {avg_reward:.4f}")
+            logger.info(f"  최고 리워드: {best_reward:.4f}")
+        
+        logger.info(f"  결과 저장 위치: {self.log_dir}")
+        logger.info("=" * 60)
 
 def main():
     """메인 함수"""
