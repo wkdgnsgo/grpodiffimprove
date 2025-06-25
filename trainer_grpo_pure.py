@@ -247,24 +247,14 @@ class QWENGRPOTrainer:
                 logger.error(f"    ❌ 프롬프트 생성 오류: {e}")
                 continue
         
-        # 배치 이미지 생성 및 리워드 계산 (메인 프로세스에서만)
-        if self.accelerator and self.accelerator.is_main_process and enhanced_prompts:
+        # 모든 프로세스에서 배치 이미지 생성 및 리워드 계산
+        if enhanced_prompts:
             batch_rewards = self.generate_batch_images_and_rewards(user_prompt, enhanced_prompts)
         else:
-            # 서브 프로세스는 기본 리워드 사용
-            batch_rewards = [0.3] * len(enhanced_prompts)
+            batch_rewards = []
         
-        # 멀티 프로세스 환경에서만 리워드 분배 (단일 GPU는 생략)
-        if self.accelerator and self.accelerator.num_processes > 1:
-            try:
-                # 서브 프로세스는 기본 리워드 사용 (브로드캐스트 대신)
-                if not self.accelerator.is_main_process:
-                    batch_rewards = [0.3] * len(enhanced_prompts)
-                    logger.info(f"🔄 서브 프로세스: 기본 리워드 사용 ({len(batch_rewards)}개)")
-            except Exception as e:
-                logger.warning(f"⚠️ 멀티 프로세스 처리 실패: {e}")
-                if not self.accelerator.is_main_process:
-                    batch_rewards = [0.3] * len(enhanced_prompts)
+        # 각 프로세스가 독립적으로 리워드 계산하므로 분배 로직 불필요
+        logger.info(f"🎯 배치 리워드 계산 완료: {len(batch_rewards)}개")
         
         # 경험 생성
         for enhanced_prompt, log_prob, reward in zip(enhanced_prompts, log_probs, batch_rewards):
@@ -287,52 +277,124 @@ class QWENGRPOTrainer:
         return batch_experiences
     
     def generate_batch_images_and_rewards(self, user_prompt: str, enhanced_prompts: List[str]) -> List[float]:
-        """배치 이미지 생성 및 리워드 계산 (메인 프로세스 전용) - 완전 배치 처리"""
-        logger.info(f"🖼️ 배치 이미지 생성 시작 ({len(enhanced_prompts)}개)")
+        """배치 이미지 생성 및 리워드 계산 - 모든 프로세스에서 실행 가능"""
+        process_info = f"프로세스 {getattr(self, 'process_id', 0)}"
+        logger.info(f"🖼️ {process_info}: 배치 이미지 생성 시작 ({len(enhanced_prompts)}개)")
         
         batch_rewards = []
         batch_images = []
         available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
         
+        # 프로세스별 GPU 할당 계획
+        # 프로세스 0: GPU 5,6 사용 (메인)
+        # 프로세스 1: GPU 7,0 사용 
+        # 프로세스 2: GPU 1,2 사용
+        # 프로세스 3: GPU 3,4 사용
+        process_id = getattr(self, 'process_id', 0)
+        
         try:
-            # 1단계: 배치 이미지 생성 (GPU 6번에서 SD3 사용)
-            logger.info("🎨 1단계: 배치 이미지 생성")
-            if available_gpus > 6 and hasattr(self, 'sd_pipeline') and self.sd_pipeline is not None:
-                with torch.cuda.device(6):
-                    for i, enhanced_prompt in enumerate(enhanced_prompts):
-                        enhanced_result = self.sd_pipeline(
-                            prompt=enhanced_prompt,
-                            num_inference_steps=28,
-                            guidance_scale=7.0,
-                            height=1024,
-                            width=1024
-                        )
-                        enhanced_image = enhanced_result.images[0]
-                        batch_images.append(enhanced_image)
-                        logger.info(f"  이미지 {i+1}/{len(enhanced_prompts)} 생성 완료")
+            # 1단계: 배치 이미지 생성 (프로세스별 GPU 사용)
+            logger.info(f"🎨 {process_info}: 1단계 - 배치 이미지 생성")
+            
+            # 각 프로세스가 독립적으로 SD3 파이프라인 생성
+            if available_gpus > 0:
+                # 프로세스별 GPU 선택
+                if process_id == 0:
+                    sd_gpu = min(6, available_gpus - 1)  # GPU 6 또는 마지막 GPU
+                elif process_id == 1:
+                    sd_gpu = min(7, available_gpus - 1) if available_gpus > 7 else 0
+                elif process_id == 2:
+                    sd_gpu = min(1, available_gpus - 1)
+                else:
+                    sd_gpu = min(3, available_gpus - 1)
+                
+                logger.info(f"🎨 {process_info}: GPU {sd_gpu}에서 SD3 사용")
+                
+                # SD3 파이프라인이 없으면 동적으로 로드
+                if not hasattr(self, 'sd_pipeline') or self.sd_pipeline is None:
+                    logger.info(f"🔧 {process_info}: SD3 파이프라인 동적 로드 중...")
+                    try:
+                        from main import load_stable_diffusion_pipeline
+                        self.sd_pipeline = load_stable_diffusion_pipeline(device=f"cuda:{sd_gpu}")
+                        logger.info(f"✅ {process_info}: SD3 파이프라인 로드 완료")
+                    except Exception as e:
+                        logger.error(f"❌ {process_info}: SD3 로드 실패: {e}")
+                        self.sd_pipeline = None
+                
+                # 이미지 생성
+                if self.sd_pipeline is not None:
+                    with torch.cuda.device(sd_gpu):
+                        for i, enhanced_prompt in enumerate(enhanced_prompts):
+                            enhanced_result = self.sd_pipeline(
+                                prompt=enhanced_prompt,
+                                num_inference_steps=28,
+                                guidance_scale=7.0,
+                                height=1024,
+                                width=1024
+                            )
+                            enhanced_image = enhanced_result.images[0]
+                            batch_images.append(enhanced_image)
+                            logger.info(f"  {process_info}: 이미지 {i+1}/{len(enhanced_prompts)} 생성 완료")
+                else:
+                    # SD3가 없는 경우 더미 이미지들
+                    from PIL import Image
+                    for _ in enhanced_prompts:
+                        batch_images.append(Image.new('RGB', (1024, 1024), color='black'))
+                    logger.warning(f"⚠️ {process_info}: SD3 없음, 더미 이미지 사용")
             else:
-                # SD3가 없는 경우 더미 이미지들
+                # GPU 없는 경우 더미 이미지
                 from PIL import Image
                 for _ in enhanced_prompts:
-                    batch_images.append(Image.new('RGB', (1024, 1024), color='black'))
-                logger.warning("⚠️ SD3 없음, 더미 이미지 사용")
+                    batch_images.append(Image.new('RGB', (1024, 1024), color='gray'))
+                logger.warning(f"⚠️ {process_info}: GPU 없음, 더미 이미지 사용")
             
-            # 2단계: 배치 리워드 계산 (GPU 5번에서 CLIP 사용)
-            logger.info("🎯 2단계: 배치 리워드 계산")
-            if available_gpus > 5 and hasattr(self, 'reward_model') and self.reward_model is not None:
-                batch_rewards = self.calculate_batch_clip_rewards(
-                    user_prompt, enhanced_prompts, batch_images
-                )
+            # 2단계: 배치 리워드 계산 (프로세스별 GPU 사용)
+            logger.info(f"🎯 {process_info}: 2단계 - 배치 리워드 계산")
+            
+            if available_gpus > 0:
+                # 프로세스별 CLIP GPU 선택
+                if process_id == 0:
+                    clip_gpu = min(5, available_gpus - 1)  # GPU 5 또는 마지막-1 GPU
+                elif process_id == 1:
+                    clip_gpu = 0
+                elif process_id == 2:
+                    clip_gpu = min(2, available_gpus - 1)
+                else:
+                    clip_gpu = min(4, available_gpus - 1)
+                
+                logger.info(f"🎯 {process_info}: GPU {clip_gpu}에서 CLIP 사용")
+                
+                # CLIP 리워드 모델이 없으면 동적으로 로드
+                if not hasattr(self, 'reward_model') or self.reward_model is None:
+                    logger.info(f"🔧 {process_info}: CLIP 리워드 모델 동적 로드 중...")
+                    try:
+                        from clip_reward import CLIPReward
+                        self.reward_model = CLIPReward(device=f"cuda:{clip_gpu}")
+                        logger.info(f"✅ {process_info}: CLIP 모델 로드 완료")
+                    except Exception as e:
+                        logger.error(f"❌ {process_info}: CLIP 로드 실패: {e}")
+                        self.reward_model = None
+                
+                # 리워드 계산
+                if self.reward_model is not None:
+                    batch_rewards = self.calculate_batch_clip_rewards(
+                        user_prompt, enhanced_prompts, batch_images
+                    )
+                else:
+                    # CLIP가 없는 경우 기본 리워드들
+                    batch_rewards = [0.3] * len(enhanced_prompts)
+                    logger.warning(f"⚠️ {process_info}: CLIP 없음, 기본 리워드 사용")
             else:
-                # CLIP가 없는 경우 기본 리워드들
-                batch_rewards = [0.3] * len(enhanced_prompts)
-                logger.warning("⚠️ CLIP 없음, 기본 리워드 사용")
+                # GPU 없는 경우 기본 리워드
+                batch_rewards = [0.2] * len(enhanced_prompts)
+                logger.warning(f"⚠️ {process_info}: GPU 없음, 기본 리워드 사용")
                 
         except Exception as e:
-            logger.error(f"❌ 배치 이미지 생성 실패: {e}")
+            logger.error(f"❌ {process_info}: 배치 이미지 생성 실패: {e}")
             batch_rewards = [0.1] * len(enhanced_prompts)  # 에러 시 낮은 리워드
         
-        logger.info(f"✅ 배치 처리 완료: 평균 리워드 {sum(batch_rewards)/len(batch_rewards):.4f}")
+        avg_reward = sum(batch_rewards)/len(batch_rewards) if batch_rewards else 0.0
+        logger.info(f"✅ {process_info}: 배치 처리 완료 - 평균 리워드 {avg_reward:.4f}")
         return batch_rewards
     
     def calculate_batch_clip_rewards(self, user_prompt: str, enhanced_prompts: List[str], images: List) -> List[float]:
