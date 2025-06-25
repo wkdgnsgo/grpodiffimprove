@@ -296,8 +296,9 @@ class SimpleGRPOTrainer:
         try:
             # 배치로 리워드 계산
             rewards = []
-            for image in images:
-                reward = self.reward_model.calculate_reward(user_prompt, image)
+            for i, image in enumerate(images):
+                enhanced_prompt = enhanced_prompts[i] if i < len(enhanced_prompts) else user_prompt
+                reward = self.reward_model.calculate_reward(user_prompt, enhanced_prompt, image)
                 rewards.append(reward)
             
             return rewards
@@ -316,7 +317,7 @@ class SimpleGRPOTrainer:
             detailed_rewards = []
             for i, (enhanced_prompt, image) in enumerate(zip(enhanced_prompts, images)):
                 # 기본 CLIP 리워드
-                clip_score = self.reward_model.calculate_reward(user_prompt, image)
+                clip_score = self.reward_model.calculate_reward(user_prompt, enhanced_prompt, image)
                 
                 # Aesthetic score (이미지 품질)
                 aesthetic_score = self.calculate_aesthetic_score(image)
@@ -389,8 +390,8 @@ class SimpleGRPOTrainer:
             if self.reward_model is None:
                 return 0.5
             
-            original_similarity = self.reward_model.calculate_reward(user_prompt, image)
-            enhanced_similarity = self.reward_model.calculate_reward(enhanced_prompt, image)
+            original_similarity = self.reward_model.calculate_reward(user_prompt, user_prompt, image)
+            enhanced_similarity = self.reward_model.calculate_reward(enhanced_prompt, enhanced_prompt, image)
             
             # 원본 프롬프트와의 유사성을 기준으로 계산
             # 향상된 프롬프트가 원본 의미를 유지하면서 개선되었는지 평가
@@ -401,6 +402,24 @@ class SimpleGRPOTrainer:
         except Exception as e:
             logger.warning(f"⚠️ 의미적 유사성 계산 실패: {e}")
             return 0.5  # 기본값
+    
+    def make_safe_filename(self, text: str, max_length: int = 50) -> str:
+        """텍스트를 안전한 파일명으로 변환"""
+        import re
+        # 특수문자 제거 및 공백을 언더스코어로 변경
+        safe_text = re.sub(r'[<>:"/\\|?*]', '', text)
+        safe_text = re.sub(r'\s+', '_', safe_text)
+        safe_text = safe_text.strip('_')
+        
+        # 길이 제한
+        if len(safe_text) > max_length:
+            safe_text = safe_text[:max_length].rstrip('_')
+        
+        # 빈 문자열 방지
+        if not safe_text:
+            safe_text = "unknown_prompt"
+        
+        return safe_text
     
     def collect_rollouts(self, prompts: List[str]) -> List[Dict]:
         """배치 롤아웃 수집 (Group-relative 방식)"""
@@ -621,9 +640,10 @@ class SimpleGRPOTrainer:
                            images: List, rewards: List[float]):
         """에피소드별 상세 이미지 및 비교 분석 저장"""
         try:
-            # 에피소드별 폴더 생성
-            episode_dir = os.path.join(self.log_dir, "episodes", f"episode_{epoch}")
-            os.makedirs(episode_dir, exist_ok=True)
+            # 원본 프롬프트별 폴더 생성 (안전한 폴더명으로 변환)
+            safe_prompt = self.make_safe_filename(user_prompt)
+            prompt_dir = os.path.join(self.log_dir, "episodes", safe_prompt)
+            os.makedirs(prompt_dir, exist_ok=True)
             
             # 1. 원본 프롬프트로 이미지 생성 (비교용)
             logger.info(f"🔍 원본 프롬프트로 비교 이미지 생성: '{user_prompt}'")
@@ -639,15 +659,15 @@ class SimpleGRPOTrainer:
                 
                 # 원본 이미지 저장
                 if original_image:
-                    original_path = os.path.join(episode_dir, f"sample_{i}_original.png")
+                    original_path = os.path.join(prompt_dir, f"epoch_{epoch}_sample_{i}_original.png")
                     original_image.save(original_path)
                 
                 # 향상된 이미지 저장
-                enhanced_path = os.path.join(episode_dir, f"sample_{i}_enhanced.png")
+                enhanced_path = os.path.join(prompt_dir, f"epoch_{epoch}_sample_{i}_enhanced.png")
                 enhanced_image.save(enhanced_path)
                 
                 # 상세 분석 텍스트 저장
-                analysis_path = os.path.join(episode_dir, f"sample_{i}_analysis.txt")
+                analysis_path = os.path.join(prompt_dir, f"epoch_{epoch}_sample_{i}_analysis.txt")
                 with open(analysis_path, 'w', encoding='utf-8') as f:
                     f.write("=" * 60 + "\n")
                     f.write(f"EPISODE {epoch} - SAMPLE {i} ANALYSIS\n")
@@ -658,8 +678,8 @@ class SimpleGRPOTrainer:
                     f.write(f"Enhanced Prompt: {enhanced_prompt}\n\n")
                     
                     f.write("🎨 IMAGES:\n")
-                    f.write(f"Original Image: sample_{i}_original.png\n")
-                    f.write(f"Enhanced Image: sample_{i}_enhanced.png\n\n")
+                    f.write(f"Original Image: epoch_{epoch}_sample_{i}_original.png\n")
+                    f.write(f"Enhanced Image: epoch_{epoch}_sample_{i}_enhanced.png\n\n")
                     
                     f.write("📊 REWARD ANALYSIS:\n")
                     f.write("-" * 40 + "\n")
@@ -714,57 +734,90 @@ class SimpleGRPOTrainer:
             traceback.print_exc()
     
     def plot_training_metrics(self, epoch: int):
-        """학습 메트릭 플롯 생성"""
+        """학습 메트릭 플롯 생성 - episodes/ 폴더에 지속 업데이트"""
         try:
+            # episodes 폴더 생성
+            episodes_dir = os.path.join(self.log_dir, "episodes")
+            os.makedirs(episodes_dir, exist_ok=True)
+            
             if not self.training_metrics['epoch_rewards']:
                 return
             
-            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-            fig.suptitle(f'GRPO Training Metrics - Epoch {epoch}', fontsize=16)
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            fig.suptitle(f'GRPO Training Progress - Updated at Epoch {epoch}', fontsize=16, fontweight='bold')
             
-            # 1. 리워드 추이
-            axes[0, 0].plot(self.training_metrics['epoch_rewards'], 'b-o', linewidth=2, markersize=6)
-            axes[0, 0].set_title('Average Reward per Epoch')
-            axes[0, 0].set_xlabel('Epoch')
-            axes[0, 0].set_ylabel('Average Reward')
+            # 1. 리워드 추이 (트렌드 라인 추가)
+            epochs_list = list(range(1, len(self.training_metrics['epoch_rewards']) + 1))
+            axes[0, 0].plot(epochs_list, self.training_metrics['epoch_rewards'], 'b-o', linewidth=2, markersize=6)
+            
+            # 트렌드 라인 추가
+            if len(epochs_list) > 1:
+                z = np.polyfit(epochs_list, self.training_metrics['epoch_rewards'], 1)
+                p = np.poly1d(z)
+                axes[0, 0].plot(epochs_list, p(epochs_list), "r--", alpha=0.8, 
+                               label=f'Trend: {z[0]:.4f}x + {z[1]:.4f}')
+                axes[0, 0].legend()
+            
+            axes[0, 0].set_title('Average Reward Over Time', fontsize=14, fontweight='bold')
+            axes[0, 0].set_xlabel('Epoch', fontsize=12)
+            axes[0, 0].set_ylabel('Average Reward', fontsize=12)
             axes[0, 0].grid(True, alpha=0.3)
             
             # 2. Policy Loss 추이
             if self.training_metrics['policy_losses']:
-                axes[0, 1].plot(self.training_metrics['policy_losses'], 'r-o', linewidth=2, markersize=6)
-                axes[0, 1].set_title('Policy Loss per Epoch')
-                axes[0, 1].set_xlabel('Epoch')
-                axes[0, 1].set_ylabel('Policy Loss')
+                axes[0, 1].plot(epochs_list, self.training_metrics['policy_losses'], 'r-o', linewidth=2, markersize=6)
+                axes[0, 1].set_title('Policy Loss Over Time', fontsize=14, fontweight='bold')
+                axes[0, 1].set_xlabel('Epoch', fontsize=12)
+                axes[0, 1].set_ylabel('Policy Loss', fontsize=12)
                 axes[0, 1].grid(True, alpha=0.3)
             
             # 3. KL Divergence 추이
             if self.training_metrics['kl_divergences']:
-                axes[1, 0].plot(self.training_metrics['kl_divergences'], 'g-o', linewidth=2, markersize=6)
-                axes[1, 0].set_title('KL Divergence per Epoch')
-                axes[1, 0].set_xlabel('Epoch')
-                axes[1, 0].set_ylabel('KL Divergence')
+                axes[1, 0].plot(epochs_list, self.training_metrics['kl_divergences'], 'g-o', linewidth=2, markersize=6)
+                axes[1, 0].set_title('KL Divergence Over Time', fontsize=14, fontweight='bold')
+                axes[1, 0].set_xlabel('Epoch', fontsize=12)
+                axes[1, 0].set_ylabel('KL Divergence', fontsize=12)
                 axes[1, 0].grid(True, alpha=0.3)
             
             # 4. Advantage 분포 (최근 에피소드)
             if self.training_metrics['advantages']:
                 recent_advantages = self.training_metrics['advantages'][-50:]  # 최근 50개
-                axes[1, 1].hist(recent_advantages, bins=20, alpha=0.7, color='purple', edgecolor='black')
-                axes[1, 1].set_title('Recent Advantage Distribution')
-                axes[1, 1].set_xlabel('Advantage Value')
-                axes[1, 1].set_ylabel('Frequency')
+                axes[1, 1].hist(recent_advantages, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+                axes[1, 1].axvline(np.mean(recent_advantages), color='red', linestyle='--', 
+                                  label=f'Mean: {np.mean(recent_advantages):.3f}')
+                axes[1, 1].legend()
+                axes[1, 1].set_title('Recent Advantage Distribution', fontsize=14, fontweight='bold')
+                axes[1, 1].set_xlabel('Advantage Value', fontsize=12)
+                axes[1, 1].set_ylabel('Frequency', fontsize=12)
+                axes[1, 1].grid(True, alpha=0.3)
+            else:
+                # Advantage가 없으면 리워드 히스토리 바 차트
+                axes[1, 1].bar(epochs_list, self.training_metrics['epoch_rewards'], 
+                              alpha=0.7, color='lightgreen', edgecolor='black')
+                axes[1, 1].set_title('Reward History (Bar Chart)', fontsize=14, fontweight='bold')
+                axes[1, 1].set_xlabel('Epoch', fontsize=12)
+                axes[1, 1].set_ylabel('Reward', fontsize=12)
                 axes[1, 1].grid(True, alpha=0.3)
             
             plt.tight_layout()
             
-            # 플롯 저장
-            plot_path = os.path.join(self.log_dir, "plots", f"training_metrics_epoch_{epoch}.png")
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            # episodes 폴더에 메인 플롯 저장 (항상 같은 파일명으로 업데이트)
+            main_plot_path = os.path.join(episodes_dir, "training_progress.png")
+            plt.savefig(main_plot_path, dpi=300, bbox_inches='tight')
+            
+            # 에포크별 백업도 저장
+            backup_plot_path = os.path.join(episodes_dir, f"training_progress_epoch_{epoch}.png")
+            plt.savefig(backup_plot_path, dpi=300, bbox_inches='tight')
+            
             plt.close()
             
-            logger.info(f"📊 에피소드 {epoch} 메트릭 플롯 저장 완료")
+            logger.info(f"📊 학습 진행 플롯 업데이트: {main_plot_path}")
+            logger.info(f"📊 에포크 백업 저장: {backup_plot_path}")
             
         except Exception as e:
             logger.error(f"❌ 플롯 생성 실패: {e}")
+            import traceback
+            traceback.print_exc()
     
     def log_epoch_metrics(self, epoch: int, experiences: List[Dict], metrics: Dict):
         """에피소드 메트릭 로깅"""
