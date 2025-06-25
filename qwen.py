@@ -13,24 +13,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QWENGRPOConfig:
-    """QWEN GRPO 통합 설정 (LoRA 최적화)"""
+    """QWEN GRPO 통합 설정 (메모리 최적화)"""
     learning_rate: float = 2e-4  # LoRA는 더 높은 학습률 사용 가능
-    batch_size: int = 8  # LoRA로 메모리 절약되어 배치 크기 증가 가능
-    num_rollouts: int = 6  # 더 많은 롤아웃 가능
+    batch_size: int = 2  # 메모리 절약을 위해 배치 크기 감소 (8 → 2)
+    num_rollouts: int = 2  # 메모리 절약을 위해 롤아웃 수 감소 (6 → 2)
     max_prompt_length: int = 77
-    max_new_tokens: int = 30
+    max_new_tokens: int = 20
     temperature: float = 1.0
     top_p: float = 0.9
     top_k: int = 100
     kl_coef: float = 0.02
     clip_ratio: float = 0.1
     entropy_coef: float = 0.02
-    num_enhancement_candidates: int = 20  # 생성할 후보 개수
     save_images: bool = True
     log_dir: str = "grpo_results"
-    # Semantic filtering 설정 (제거됨 - GRPO가 직접 학습하도록)
-    use_semantic_filtering: bool = False  # 후보 생성시 semantic filtering 사용
-    semantic_threshold: float = 0.7  # Semantic similarity threshold
 
 class QWENModel:
 
@@ -91,14 +87,12 @@ class QWENModel:
         # LoRA 설정 및 적용 - 고성능 설정 (메모리 여유분 활용)
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=32,  # LoRA rank 대폭 증가 (16 → 32)
-            lora_alpha=64,  # LoRA scaling parameter 증가 (32 → 64)
-            lora_dropout=0.05,  # 드롭아웃 감소로 더 강한 학습
+            r=8,  # LoRA rank 대폭 감소 (32 → 8) - 메모리 절약
+            lora_alpha=16,  # LoRA scaling parameter 감소 (64 → 16)
+            lora_dropout=0.1,  # 드롭아웃 증가
             target_modules=[
-                # Attention 모듈들 (모든 projection)
+                # Attention 모듈들만 (MLP 제거로 메모리 절약)
                 "q_proj", "v_proj", "k_proj", "o_proj",
-                # MLP 모듈들 (모든 linear layers)
-                "gate_proj", "up_proj", "down_proj",
                 # Vision 관련 모듈들 추가
                 "visual_proj", "lm_head"
             ],
@@ -142,15 +136,17 @@ class QWENModel:
         if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             
-        # 생성 설정 - LoRA 최적화
+        # 생성 설정 - 극한 메모리 최적화
         self.generation_config = GenerationConfig(
-            max_new_tokens=30,  # 적절한 토큰 수로 복원
+            max_new_tokens=20,  # 토큰 수 더 제한 (30 → 20)
             temperature=self.temperature,
             top_p=0.9,
             do_sample=True,
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
             use_cache=False,  # 메모리 절약을 위해 캐시 비활성화 유지
+            output_hidden_states=False,  # hidden states 출력 비활성화
+            output_attentions=False,  # attention weights 출력 비활성화
         )
         
         logger.info("✅ QWEN 모델 로드 완료 (메모리 최적화 적용)")
@@ -668,8 +664,8 @@ class QWENModel:
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.grpo_optimizer.step()
         
-        # 메트릭 반환
-        return {
+        # 메트릭 저장 (메모리 정리 전에)
+        metrics = {
             'policy_loss': policy_loss.item(),
             'kl_div': kl_div.item(),
             'total_loss': total_loss.item(),
@@ -677,6 +673,14 @@ class QWENModel:
             'baseline': baseline.item(),
             'mean_advantage': advantages.mean().item()
         }
+        
+        # 메모리 정리
+        del current_log_probs, ref_log_probs, ratio, clipped_ratio
+        del policy_loss, kl_penalty, total_loss, rewards, advantages
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return metrics
 
     def _post_process_output(self, raw_output):
         """생성된 출력 후처리"""

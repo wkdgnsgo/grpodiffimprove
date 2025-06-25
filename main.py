@@ -912,11 +912,17 @@ class SimpleGRPOTrainer:
                 # 플롯 생성 (매 에포크마다)
                 self.plot_training_metrics(epoch + 1)
                 
-                # GPU 메모리 정리
+                # 적극적인 GPU 메모리 정리
                 if self.use_gpu:
-                    for gpu_id in range(min(3, torch.cuda.device_count())):
+                    # 모든 GPU에 대해 메모리 정리
+                    for gpu_id in range(torch.cuda.device_count()):
                         with torch.cuda.device(gpu_id):
                             torch.cuda.empty_cache()
+                    
+                    # 추가 메모리 정리 시도
+                    import gc
+                    gc.collect()
+                    torch.cuda.synchronize()
                 
                 logger.info(f"⏱️ 에포크 {epoch + 1} 완료 시간: {epoch_time:.2f}초")
                 
@@ -938,13 +944,13 @@ def main():
     logger.info("  GPU 2: Stable Diffusion 3 Image Generation")
     logger.info("=" * 60)
     
-    # 설정 - QWEN 7B + 고성능 LoRA 최적화
+    # 설정 - QWEN 7B + 극한 메모리 최적화
     config = QWENGRPOConfig(
         learning_rate=1e-4,  # 7B 모델에 적합한 학습률
-        batch_size=2,  # 7B 모델에 맞는 배치 크기
-        num_rollouts=2,  # 7B 모델에 맞는 롤아웃 수
+        batch_size=1,  # 극한 메모리 절약 (2 → 1)
+        num_rollouts=1,  # 극한 메모리 절약 (2 → 1)
         max_prompt_length=77,
-        max_new_tokens=30,  # 토큰 수 유지
+        max_new_tokens=20,  # 토큰 수 더 제한 (30 → 20)
         temperature=1.2,
         top_p=0.9,
         top_k=100,
