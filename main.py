@@ -28,7 +28,7 @@ from qwen import QWENModel, QWENGRPOConfig
 from clip_reward import CLIPReward
 from trainer_grpo_pure import QWENGRPOTrainer
 
-def load_stable_diffusion_pipeline(device="cuda:7"):
+def load_stable_diffusion_pipeline(device="cuda:6"):
     """Stable Diffusion 3 파이프라인 로드 (GPU 5번 전용)"""
     try:
         from diffusers import StableDiffusion3Pipeline
@@ -107,10 +107,10 @@ def main():
             logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
             logger.info(f"    메모리: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f}GB")
         
-        logger.info("\n🎯 GPU 배치 계획 (DeepSpeed ZeRO Stage 3 전체 학습):")
-        logger.info("  GPU 2-5: QWEN 전체 학습 (DeepSpeed ZeRO Stage 3 분산)")
-        logger.info("  GPU 6: CLIP 리워드 모델")
-        logger.info("  GPU 7: Stable Diffusion 3 (이미지 생성 전용)")
+        logger.info("\n🎯 GPU 배치 계획 (DeepSpeed ZeRO Stage 3 전체 학습 - 8 GPU):")
+        logger.info("  GPU 0-3: QWEN 전체 학습 (DeepSpeed ZeRO Stage 3 분산)")
+        logger.info("  GPU 4-5: CLIP 리워드 모델 (이중화)")
+        logger.info("  GPU 6-7: Stable Diffusion 3 (이중화)")
     else:
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
@@ -144,14 +144,23 @@ def main():
             # 메모리 할당 최적화
             torch.cuda.empty_cache()
             
-            # GPU 메모리 제한 설정 (DeepSpeed ZeRO Stage 3)
-            # GPU 2-5에 대해 메모리 제한 설정
-            gpu_memory_fractions = {2: 0.95, 3: 0.95, 4: 0.95, 5: 0.95}
+            # GPU 메모리 제한 설정 (DeepSpeed ZeRO Stage 3 - 8 GPU)
+            # GPU 0-7에 대해 메모리 제한 설정
+            gpu_memory_fractions = {
+                0: 0.90,  # QWEN 메인 프로세스 (약간 낮게)
+                1: 0.95,  # QWEN 서브 프로세스
+                2: 0.95,  # QWEN 서브 프로세스
+                3: 0.95,  # QWEN 서브 프로세스
+                4: 0.95,  # CLIP 메인
+                5: 0.95,  # CLIP 백업
+                6: 0.95,  # SD3 메인
+                7: 0.95   # SD3 백업
+            }
             
             for gpu_id, fraction in gpu_memory_fractions.items():
                 if gpu_id < torch.cuda.device_count():
                     torch.cuda.set_per_process_memory_fraction(fraction, device=gpu_id)
-                    logger.info(f"🔧 GPU {gpu_id} 메모리 제한 설정: {int(fraction*100)}% (ZeRO Stage 3)")
+                    logger.info(f"🔧 GPU {gpu_id} 메모리 제한 설정: {int(fraction*100)}% (8 GPU 모드)")
             
             # PyTorch 메모리 할당 최적화
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -185,15 +194,15 @@ def main():
         
         # 메인 프로세스에서만 로딩
         if accelerator.is_main_process:
-            logger.info("🎯 메인 프로세스: 통합 모델들 로딩 (GPU 6번, 7번)")
+            logger.info("🎯 메인 프로세스: 통합 모델들 로딩 (GPU 4-7)")
             
-            # CLIP 리워드 모델 (GPU 6번)
-            reward_model = CLIPReward(device="cuda:6")
-            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 6)")
+            # CLIP 리워드 모델 (GPU 4번 메인)
+            reward_model = CLIPReward(device="cuda:4")
+            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 4)")
             
-            # Stable Diffusion 3 파이프라인 (GPU 7번) - 1개만 로딩
-            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:7")
-            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 7) - 1개만 로딩")
+            # Stable Diffusion 3 파이프라인 (GPU 6번 메인) - 1개만 로딩
+            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:6")
+            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 6) - 1개만 로딩")
             
             # Reference 모델은 전체 학습에서 비활성화
             logger.info("🎯 전체 학습 모드: Reference 모델 비활성화")

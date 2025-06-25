@@ -5,7 +5,7 @@
 #SBATCH --nodelist=hpc-pr-a-pod20
 #SBATCH --ntasks-per-node=1 # total number of tasks per node
 #SBATCH --cpus-per-task=8 # cpu-cores per task (멀티 GPU + 추론 모델 처리용)
-#SBATCH --gres=gpu:6 # 6개 GPU 필요 (QWEN 전체학습: 2-5, CLIP: 6, SD3: 7)
+#SBATCH --gres=gpu:8 # 8개 GPU 필요 (QWEN 전체학습: 0-3, CLIP: 4-5, SD3: 6-7)
 #SBATCH --time=10:00:00 # total run time limit (HH:MM:SS) - 멀티 GPU로 더 긴 학습
 #SBATCH --output=qwen_grpo_accelerate_training.out
 #SBATCH --error=qwen_grpo_accelerate_training.err
@@ -16,9 +16,11 @@
 # Accelerate 멀티 GPU 환경 변수 설정
 export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 export WORLD_SIZE=$(($SLURM_NNODES * SLURM_NTASKS_PER_NODE))
-export CUDA_VISIBLE_DEVICES=2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export TOKENIZERS_PARALLELISM=false
 export WANDB_DISABLED=true # WandB 비활성화 (선택사항)
+export CUDA_LAUNCH_BLOCKING=1 # CUDA 오류 디버깅
+export TORCH_USE_CUDA_DSA=1 # CUDA 디바이스 오류 체크
 
 echo "WORLD_SIZE="$WORLD_SIZE
 echo "CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES
@@ -32,17 +34,19 @@ echo "=== GPU 정보 ==="
 nvidia-smi
 echo ""
 
-# GPU 배치 정보 출력 (DeepSpeed ZeRO Stage 3 전체 학습)
-echo "=== GPU 배치 계획 (DeepSpeed ZeRO Stage 3 전체 학습) ==="
-echo "GPU 2-5: QWEN 전체 학습 (DeepSpeed ZeRO Stage 3 분산)"
-echo "  - GPU 2: QWEN 메인 프로세스 (1/4)"
-echo "  - GPU 3: QWEN 서브 프로세스 (2/4)"
-echo "  - GPU 4: QWEN 서브 프로세스 (3/4)"
-echo "  - GPU 5: QWEN 서브 프로세스 (4/4)"
-echo "GPU 6: CLIP 리워드 모델"
-echo "  - CLIP 리워드 계산 전용"
-echo "GPU 7: Stable Diffusion 3"
-echo "  - SD3 파이프라인 (이미지 생성 전용)"
+# GPU 배치 정보 출력 (DeepSpeed ZeRO Stage 3 전체 학습 - 8 GPU)
+echo "=== GPU 배치 계획 (DeepSpeed ZeRO Stage 3 전체 학습 - 8 GPU) ==="
+echo "GPU 0-3: QWEN 전체 학습 (DeepSpeed ZeRO Stage 3 분산)"
+echo "  - GPU 0: QWEN 메인 프로세스 (1/4)"
+echo "  - GPU 1: QWEN 서브 프로세스 (2/4)"
+echo "  - GPU 2: QWEN 서브 프로세스 (3/4)"
+echo "  - GPU 3: QWEN 서브 프로세스 (4/4)"
+echo "GPU 4-5: CLIP 리워드 모델 (이중화)"
+echo "  - GPU 4: CLIP 메인"
+echo "  - GPU 5: CLIP 백업"
+echo "GPU 6-7: Stable Diffusion 3 (이중화)"
+echo "  - GPU 6: SD3 메인"
+echo "  - GPU 7: SD3 백업"
 echo ""
 
 # Accelerate 설정 자동 생성
@@ -54,7 +58,7 @@ compute_environment: LOCAL_MACHINE
 debug: false
 distributed_type: MULTI_GPU
 downcast_bf16: 'no'
-gpu_ids: '2,3,4,5'
+gpu_ids: '0,1,2,3'
 machine_rank: 0
 main_training_function: main
 mixed_precision: fp16
