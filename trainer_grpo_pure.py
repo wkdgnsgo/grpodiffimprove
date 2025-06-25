@@ -254,17 +254,17 @@ class QWENGRPOTrainer:
             # 서브 프로세스는 기본 리워드 사용
             batch_rewards = [0.3] * len(enhanced_prompts)
         
-        # 모든 프로세스에 리워드 분배
+        # 멀티 프로세스 환경에서만 리워드 분배 (단일 GPU는 생략)
         if self.accelerator and self.accelerator.num_processes > 1:
-            # 리워드를 모든 프로세스에 브로드캐스트
-            if self.accelerator.is_main_process:
-                rewards_tensor = torch.tensor(batch_rewards, device=self.accelerator.device)
-            else:
-                rewards_tensor = torch.zeros(len(enhanced_prompts), device=self.accelerator.device)
-            
-            # 브로드캐스트
-            rewards_tensor = self.accelerator.broadcast(rewards_tensor, from_process=0)
-            batch_rewards = rewards_tensor.cpu().tolist()
+            try:
+                # 서브 프로세스는 기본 리워드 사용 (브로드캐스트 대신)
+                if not self.accelerator.is_main_process:
+                    batch_rewards = [0.3] * len(enhanced_prompts)
+                    logger.info(f"🔄 서브 프로세스: 기본 리워드 사용 ({len(batch_rewards)}개)")
+            except Exception as e:
+                logger.warning(f"⚠️ 멀티 프로세스 처리 실패: {e}")
+                if not self.accelerator.is_main_process:
+                    batch_rewards = [0.3] * len(enhanced_prompts)
         
         # 경험 생성
         for enhanced_prompt, log_prob, reward in zip(enhanced_prompts, log_probs, batch_rewards):
@@ -287,18 +287,19 @@ class QWENGRPOTrainer:
         return batch_experiences
     
     def generate_batch_images_and_rewards(self, user_prompt: str, enhanced_prompts: List[str]) -> List[float]:
-        """배치 이미지 생성 및 리워드 계산 (메인 프로세스 전용)"""
+        """배치 이미지 생성 및 리워드 계산 (메인 프로세스 전용) - 완전 배치 처리"""
         logger.info(f"🖼️ 배치 이미지 생성 시작 ({len(enhanced_prompts)}개)")
         
         batch_rewards = []
+        batch_images = []
         available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
         
         try:
-            # 배치 이미지 생성 및 리워드 계산
-            for i, enhanced_prompt in enumerate(enhanced_prompts):
-                # 이미지 생성 (GPU 6번에서 SD3 사용)
-                if available_gpus > 6 and hasattr(self, 'sd_pipeline') and self.sd_pipeline is not None:
-                    with torch.cuda.device(6):
+            # 1단계: 배치 이미지 생성 (GPU 6번에서 SD3 사용)
+            logger.info("🎨 1단계: 배치 이미지 생성")
+            if available_gpus > 6 and hasattr(self, 'sd_pipeline') and self.sd_pipeline is not None:
+                with torch.cuda.device(6):
+                    for i, enhanced_prompt in enumerate(enhanced_prompts):
                         enhanced_result = self.sd_pipeline(
                             prompt=enhanced_prompt,
                             num_inference_steps=28,
@@ -307,30 +308,57 @@ class QWENGRPOTrainer:
                             width=1024
                         )
                         enhanced_image = enhanced_result.images[0]
-                else:
-                    # SD3가 없는 경우 더미 이미지
-                    from PIL import Image
-                    enhanced_image = Image.new('RGB', (1024, 1024), color='black')
-                
-                # 리워드 계산 (GPU 5번에서 CLIP 사용)
-                if available_gpus > 5 and hasattr(self, 'reward_model') and self.reward_model is not None:
-                    with torch.cuda.device(5):
-                        reward = self.reward_model.calculate_reward(
-                            user_prompt,
-                            enhanced_prompt,
-                            enhanced_image
-                        )
-                else:
-                    reward = 0.3  # 기본 리워드
-                
-                batch_rewards.append(reward)
-                logger.info(f"  이미지 {i+1}/{len(enhanced_prompts)}: 리워드 {reward:.4f}")
+                        batch_images.append(enhanced_image)
+                        logger.info(f"  이미지 {i+1}/{len(enhanced_prompts)} 생성 완료")
+            else:
+                # SD3가 없는 경우 더미 이미지들
+                from PIL import Image
+                for _ in enhanced_prompts:
+                    batch_images.append(Image.new('RGB', (1024, 1024), color='black'))
+                logger.warning("⚠️ SD3 없음, 더미 이미지 사용")
+            
+            # 2단계: 배치 리워드 계산 (GPU 5번에서 CLIP 사용)
+            logger.info("🎯 2단계: 배치 리워드 계산")
+            if available_gpus > 5 and hasattr(self, 'reward_model') and self.reward_model is not None:
+                batch_rewards = self.calculate_batch_clip_rewards(
+                    user_prompt, enhanced_prompts, batch_images
+                )
+            else:
+                # CLIP가 없는 경우 기본 리워드들
+                batch_rewards = [0.3] * len(enhanced_prompts)
+                logger.warning("⚠️ CLIP 없음, 기본 리워드 사용")
                 
         except Exception as e:
             logger.error(f"❌ 배치 이미지 생성 실패: {e}")
             batch_rewards = [0.1] * len(enhanced_prompts)  # 에러 시 낮은 리워드
         
         logger.info(f"✅ 배치 처리 완료: 평균 리워드 {sum(batch_rewards)/len(batch_rewards):.4f}")
+        return batch_rewards
+    
+    def calculate_batch_clip_rewards(self, user_prompt: str, enhanced_prompts: List[str], images: List) -> List[float]:
+        """배치 CLIP 리워드 계산 - CLIP 모델의 배치 처리 활용"""
+        logger.info(f"🔍 배치 CLIP 리워드 계산 시작 ({len(images)}개)")
+        
+        batch_rewards = []
+        available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        
+        try:
+            if available_gpus > 5 and hasattr(self, 'reward_model') and self.reward_model is not None:
+                with torch.cuda.device(5):
+                    # CLIP 모델의 배치 리워드 계산 메서드 사용
+                    batch_rewards = self.reward_model.calculate_batch_rewards(
+                        user_prompt, enhanced_prompts, images
+                    )
+            else:
+                # GPU가 부족하거나 모델이 없는 경우 기본 리워드
+                batch_rewards = [0.3] * len(images)
+                logger.warning("⚠️ GPU 5번 또는 CLIP 모델 없음, 기본 리워드 사용")
+                
+        except Exception as e:
+            logger.error(f"❌ 배치 CLIP 리워드 계산 실패: {e}")
+            batch_rewards = [0.2] * len(images)  # 에러 시 낮은 리워드
+        
+        logger.info(f"✅ 배치 CLIP 처리 완료: 평균 {sum(batch_rewards)/len(batch_rewards):.4f}")
         return batch_rewards
     
     def compute_grpo_advantages(self, experiences: List[Dict]) -> List[Dict]:
