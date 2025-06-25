@@ -1,12 +1,12 @@
 compute_environment: LOCAL_MACHINE
 distributed_type: MULTI_GPU
 downcast_bf16: "no"
-gpu_ids: "0,1"
+gpu_ids: "2,3,4,5"
 machine_rank: 0
 main_training_function: main
 mixed_precision: fp16
 num_machines: 1
-num_processes: 2
+num_processes: 4
 rdzv_backend: static
 same_network: true
 tpu_env: []
@@ -19,21 +19,29 @@ gradient_accumulation_steps: 2
 dataloader_config:
   split_batches: true
 
-# DeepSpeed ZeRO 스테이지 2 활성화 (GPU 0 OOM 방지)
+# DeepSpeed ZeRO 스테이지 3 활성화 (전체 학습용)
 deepspeed_config:
   gradient_accumulation_steps: 4
-  train_batch_size: 2
+  train_batch_size: 4
   train_micro_batch_size_per_gpu: 1
 
   zero_optimization:
-    stage: 2
-    allgather_partitions: true
-    allgather_bucket_size: 2e8
+    stage: 3
+    offload_optimizer:
+      device: cpu
+      pin_memory: true
+    offload_param:
+      device: cpu
+      pin_memory: true
     overlap_comm: true
-    reduce_scatter: true
-    reduce_bucket_size: 2e8
     contiguous_gradients: true
-    cpu_offload: false
+    sub_group_size: 1e9
+    reduce_bucket_size: 1e6
+    stage3_prefetch_bucket_size: 1e6
+    stage3_param_persistence_threshold: 1e4
+    stage3_max_live_parameters: 1e9
+    stage3_max_reuse_distance: 1e9
+    stage3_gather_16bit_weights_on_model_save: true
 
   fp16:
     enabled: true
@@ -53,6 +61,6 @@ deepspeed_config:
     synchronize_checkpoint_boundary: false
     profile: false
 
-  # GPU 0 OOM 방지를 위한 추가 메모리 최적화
+  # GPU 메모리 최적화 (GPU 2-5 전체 학습용)
   memory_efficient_attention: true
-  max_memory_MB: 30000 # GPU 0에 대한 메모리 제한
+  max_memory_MB: 38000 # GPU별 메모리 제한 (38GB)

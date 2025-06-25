@@ -28,7 +28,7 @@ from qwen import QWENModel, QWENGRPOConfig
 from clip_reward import CLIPReward
 from trainer_grpo_pure import QWENGRPOTrainer
 
-def load_stable_diffusion_pipeline(device="cuda:5"):
+def load_stable_diffusion_pipeline(device="cuda:7"):
     """Stable Diffusion 3 파이프라인 로드 (GPU 5번 전용)"""
     try:
         from diffusers import StableDiffusion3Pipeline
@@ -107,20 +107,20 @@ def main():
             logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
             logger.info(f"    메모리: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f}GB")
         
-        logger.info("\n🎯 GPU 배치 계획 (Accelerate 2-GPU - GPU 0 부담 감소):")
-        logger.info("  GPU 0-1: QWEN RL 학습 (Accelerate 분산 학습)")
-        logger.info("  GPU 2: CLIP + QWEN Reference (통합)")
-        logger.info("  GPU 3: Stable Diffusion 3 (이미지 생성 전용)")
+        logger.info("\n🎯 GPU 배치 계획 (DeepSpeed ZeRO Stage 3 전체 학습):")
+        logger.info("  GPU 2-5: QWEN 전체 학습 (DeepSpeed ZeRO Stage 3 분산)")
+        logger.info("  GPU 6: CLIP 리워드 모델")
+        logger.info("  GPU 7: Stable Diffusion 3 (이미지 생성 전용)")
     else:
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
-    # QWEN GRPO 설정 (Accelerate 멀티 GPU) - GPU 0 OOM 방지
+    # QWEN GRPO 설정 (DeepSpeed ZeRO Stage 3 전체 학습)
     config = QWENGRPOConfig(
-        learning_rate=1e-6,
-        batch_size=1,  # GPU 0 OOM 방지를 위해 배치 크기 1로 축소
-        num_rollouts=1,  # GPU 0 메모리 절약을 위해 롤아웃 수 1로 축소
+        learning_rate=5e-7,  # 전체 학습용 낮은 학습률
+        batch_size=2,  # DeepSpeed ZeRO Stage 3로 배치 크기 증가
+        num_rollouts=2,  # 4개 GPU로 롤아웃 수 증가
         max_prompt_length=77,
-        max_new_tokens=20,  # 토큰 수 더 축소
+        max_new_tokens=25,  # 토큰 수 복원
         temperature=1.2,
         top_p=0.9,
         top_k=100,
@@ -128,7 +128,7 @@ def main():
         clip_ratio=0.2,
         entropy_coef=0.01,
         save_images=True,
-        log_dir="qwen_grpo_results"
+        log_dir="qwen_grpo_full_training_results"
     )
     
     logger.info("📋 QWEN GRPO 설정 (Accelerate 멀티 GPU):")
@@ -144,16 +144,14 @@ def main():
             # 메모리 할당 최적화
             torch.cuda.empty_cache()
             
-            # GPU 0 메모리 제한 설정 (GPU 0 OOM 방지)
-            if accelerator.local_process_index == 0:
-                # GPU 0은 메인 프로세스로 메모리 사용량이 높으므로 제한
-                torch.cuda.set_per_process_memory_fraction(0.8, device=0)
-                logger.info("🔧 GPU 0 메모리 제한 설정: 80% (메인 프로세스)")
-            else:
-                # 다른 GPU들은 90% 사용 가능
-                device_idx = accelerator.local_process_index
-                torch.cuda.set_per_process_memory_fraction(0.9, device=device_idx)
-                logger.info(f"🔧 GPU {device_idx} 메모리 제한 설정: 90%")
+            # GPU 메모리 제한 설정 (DeepSpeed ZeRO Stage 3)
+            # GPU 2-5에 대해 메모리 제한 설정
+            gpu_memory_fractions = {2: 0.95, 3: 0.95, 4: 0.95, 5: 0.95}
+            
+            for gpu_id, fraction in gpu_memory_fractions.items():
+                if gpu_id < torch.cuda.device_count():
+                    torch.cuda.set_per_process_memory_fraction(fraction, device=gpu_id)
+                    logger.info(f"🔧 GPU {gpu_id} 메모리 제한 설정: {int(fraction*100)}% (ZeRO Stage 3)")
             
             # PyTorch 메모리 할당 최적화
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -161,7 +159,7 @@ def main():
             logger.info("🧹 초기 GPU 메모리 정리 및 최적화 완료")
         
         # 1. QWEN VL 모델 로드 (Accelerate로 분산)
-        logger.info("\n🧠 QWEN VL 모델 + GRPO 로딩... (Accelerate 분산)")
+        logger.info("\n🧠 QWEN VL 모델 + 전체 학습 로딩... (DeepSpeed ZeRO Stage 3)")
         qwen_model = QWENModel(
             model_name="Qwen/Qwen2-VL-7B-Instruct",
             device="accelerate",  # Accelerate 전용 모드
@@ -187,19 +185,18 @@ def main():
         
         # 메인 프로세스에서만 로딩
         if accelerator.is_main_process:
-            logger.info("🎯 메인 프로세스: 통합 모델들 로딩 (GPU 2번, 3번)")
+            logger.info("🎯 메인 프로세스: 통합 모델들 로딩 (GPU 6번, 7번)")
             
-            # CLIP 리워드 모델 (GPU 2번)
-            reward_model = CLIPReward(device="cuda:2")
-            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 2)")
+            # CLIP 리워드 모델 (GPU 6번)
+            reward_model = CLIPReward(device="cuda:6")
+            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 6)")
             
-            # Stable Diffusion 3 파이프라인 (GPU 3번) - 1개만 로딩
-            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:3")
-            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 3) - 1개만 로딩")
+            # Stable Diffusion 3 파이프라인 (GPU 7번) - 1개만 로딩
+            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:7")
+            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 7) - 1개만 로딩")
             
-            # QWEN Reference 모델은 이미 qwen.py에서 GPU 2번으로 설정됨
-            if hasattr(qwen_model, 'ref_model') and qwen_model.ref_model is not None:
-                logger.info("✅ QWEN Reference 모델이 이미 GPU 2에 설정됨")
+            # Reference 모델은 전체 학습에서 비활성화
+            logger.info("🎯 전체 학습 모드: Reference 모델 비활성화")
         else:
             # 서브 프로세스에서는 로딩하지 않음
             logger.info("🎯 서브 프로세스: 통합 모델들 로딩 건너뛰기")
