@@ -491,6 +491,55 @@ class QWENModel:
         
         return enhanced_prompt, avg_log_prob
 
+    def calculate_log_prob_for_grpo(self, user_prompt: str, enhanced_prompt: str) -> torch.Tensor:
+        """현재 모델의 로그 확률 계산 (gradient 계산 필요)"""
+        # VLM에 입력할 메시지 구성
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.user_template.format(user_prompt=user_prompt)}
+        ]
+        
+        # 템플릿 적용
+        prompt = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
+        
+        # 전체 시퀀스 (프롬프트 + 생성된 텍스트)
+        full_text = prompt + enhanced_prompt
+        
+        # 토크나이징
+        inputs = self.tokenizer(
+            full_text, 
+            return_tensors="pt", 
+            padding=True, 
+            truncation=True
+        )
+        
+        # Accelerate 환경이 아닐 때만 명시적으로 디바이스 이동
+        if self.device != "accelerate":
+            inputs = inputs.to(self.device)
+        
+        # 현재 모델로 로그 확률 계산 (gradient 계산)
+        model_for_gen = self._get_model_for_generation()
+        outputs = model_for_gen(
+            input_ids=inputs['input_ids'],
+            attention_mask=inputs['attention_mask']
+        )
+        
+        # 생성된 부분의 로그 확률만 계산
+        prompt_length = len(self.tokenizer.encode(prompt))
+        generated_logits = outputs.logits[0, prompt_length-1:-1]  # 생성된 부분만
+        generated_tokens = inputs['input_ids'][0, prompt_length:]
+        
+        # 로그 확률 계산 (gradient 유지)
+        log_probs = F.log_softmax(generated_logits, dim=-1)
+        token_log_probs = log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
+        
+        # 평균 로그 확률 반환 (gradient 유지)
+        return token_log_probs.mean()
+
     def get_ref_model_log_prob(self, user_prompt: str, enhanced_prompt: str) -> torch.Tensor:
         """참조 모델의 로그 확률 계산 (단일 GPU 모드)"""
         # Reference model이 없으면 더미 값 반환 (단일 GPU 모드에서는 항상 있어야 함)
@@ -562,9 +611,9 @@ class QWENModel:
             old_log_probs.append(exp['log_prob'])
             rewards.append(exp['reward'])
         
-        # 텐서로 변환 (단일 GPU 모드)
-        old_log_probs = torch.stack(old_log_probs).half()
-        rewards = torch.tensor(rewards, device=self.device, dtype=torch.float16)
+        # 텐서로 변환 (gradient 계산을 위해 float32 사용)
+        old_log_probs = torch.stack(old_log_probs)
+        rewards = torch.tensor(rewards, device=self.device, dtype=torch.float32)
         
         # Group-relative advantage 사용 (main.py에서 계산됨) - 단일 GPU 모드
         advantages = []
@@ -575,25 +624,25 @@ class QWENModel:
                 # fallback: 기존 방식
                 advantages.append(exp['reward'] - rewards.mean().item())
         
-        advantages = torch.tensor(advantages, device=self.device, dtype=torch.float16)
+        advantages = torch.tensor(advantages, device=self.device, dtype=torch.float32)
         
         baseline = rewards.mean()  # 로깅용
         
-        # 현재 모델과 참조 모델의 로그 확률 계산
+        # 현재 모델과 참조 모델의 로그 확률 계산 (gradient 계산 필요)
         current_log_probs = []
         ref_log_probs = []
         
         for user_prompt, enhanced_prompt in zip(user_prompts, enhanced_prompts):
-            # 현재 모델의 로그 확률 (gradient 계산)
-            _, current_log_prob = self.generate_grpo_enhanced_prompt(user_prompt)
+            # 현재 모델의 로그 확률 계산 (gradient 필요)
+            current_log_prob = self.calculate_log_prob_for_grpo(user_prompt, enhanced_prompt)
             current_log_probs.append(current_log_prob)
             
-            # 참조 모델의 로그 확률 (없으면 더미값)
+            # 참조 모델의 로그 확률 (gradient 불필요)
             ref_log_prob = self.get_ref_model_log_prob(user_prompt, enhanced_prompt)
             ref_log_probs.append(ref_log_prob)
         
-        current_log_probs = torch.stack(current_log_probs).half()
-        ref_log_probs = torch.stack(ref_log_probs).half()
+        current_log_probs = torch.stack(current_log_probs)
+        ref_log_probs = torch.stack(ref_log_probs)
         
         # 중요도 비율 계산
         ratio = torch.exp(current_log_probs - old_log_probs)
