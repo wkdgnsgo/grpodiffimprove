@@ -960,7 +960,7 @@ def main():
         trainer = SimpleGRPOTrainer(config)
         
         # 학습 실행
-        trainer.train(num_epochs=3)
+        trainer.train(num_epochs=15)
         
     except Exception as e:
         logger.error(f"❌ 학습 중 오류 발생: {e}")
