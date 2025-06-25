@@ -26,8 +26,8 @@ class QWENGRPOConfig:
     num_enhancement_candidates: int = 20  # 생성할 후보 개수
     save_images: bool = True
     log_dir: str = "grpo_results"
-    # Semantic filtering 설정
-    use_semantic_filtering: bool = True  # 후보 생성시 semantic filtering 사용
+    # Semantic filtering 설정 (제거됨 - GRPO가 직접 학습하도록)
+    use_semantic_filtering: bool = False  # 후보 생성시 semantic filtering 사용
     semantic_threshold: float = 0.7  # Semantic similarity threshold
 
 class QWENModel:
@@ -237,22 +237,9 @@ class QWENModel:
             truncation=True
         ).to(self.device)
         
-        # Semantic filtering을 위한 sentence transformer (필요시)
-        sentence_model = None
-        if use_semantic_filtering:
-            try:
-                from sentence_transformers import SentenceTransformer, util
-                sentence_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-                if torch.cuda.is_available():
-                    sentence_model = sentence_model.to(self.device)
-                logger.info("✅ Semantic filtering 활성화")
-            except ImportError:
-                logger.warning("⚠️ sentence-transformers 없음, semantic filtering 비활성화")
-                use_semantic_filtering = False
-        
-        # 더 많은 후보를 생성한 후 필터링 (semantic filtering 사용시)
-        generation_multiplier = 2 if use_semantic_filtering else 1
-        total_generations = num_candidates * generation_multiplier
+        # Semantic filtering 제거 - GRPO가 직접 exploration과 exploitation 균형을 학습
+        # 다양한 후보 생성을 위해 더 많은 시도
+        total_generations = num_candidates * 2
         
         raw_candidates = []
         
@@ -288,48 +275,13 @@ class QWENModel:
             if enhanced_prompt not in raw_candidates and enhanced_prompt != user_prompt:
                 raw_candidates.append(enhanced_prompt)
         
-        # Semantic filtering 적용
-        if use_semantic_filtering and sentence_model is not None:
-            logger.info(f"🔍 Semantic filtering: {len(raw_candidates)}개 후보 → {num_candidates}개 선택")
-            
-            # 원본 프롬프트 임베딩
-            with torch.no_grad():
-                original_embed = sentence_model.encode(user_prompt, convert_to_tensor=True)
-                
-                # 각 후보의 semantic similarity 계산
-                candidate_scores = []
-                for candidate in raw_candidates:
-                    candidate_embed = sentence_model.encode(candidate, convert_to_tensor=True)
-                    similarity = util.cos_sim(original_embed, candidate_embed).item()
-                    candidate_scores.append((candidate, similarity))
-                
-                # Semantic threshold 이상인 후보들만 선택
-                valid_candidates = [
-                    (candidate, score) for candidate, score in candidate_scores 
-                    if score >= semantic_threshold
-                ]
-                
-                if len(valid_candidates) < num_candidates:
-                    logger.warning(f"⚠️ Semantic threshold {semantic_threshold} 이상 후보가 {len(valid_candidates)}개만 있음")
-                    # threshold를 낮춰서 충분한 후보 확보
-                    lower_threshold = semantic_threshold - 0.1
-                    valid_candidates = [
-                        (candidate, score) for candidate, score in candidate_scores 
-                        if score >= lower_threshold
-                    ]
-                    logger.info(f"📉 Threshold를 {lower_threshold}로 낮춰서 {len(valid_candidates)}개 후보 확보")
-                
-                # 점수 순으로 정렬하고 상위 N개 선택
-                valid_candidates.sort(key=lambda x: x[1], reverse=True)
-                candidates = [candidate for candidate, _ in valid_candidates[:num_candidates]]
-                
-                # 로그 출력
-                logger.info("🎯 Semantic filtering 결과:")
-                for i, (candidate, score) in enumerate(valid_candidates[:num_candidates]):
-                    logger.info(f"  {i}: {score:.3f} - {candidate[:60]}...")
-        else:
-            # Semantic filtering 없이 처음 N개 선택
-            candidates = raw_candidates[:num_candidates]
+        # Semantic filtering 제거 - 다양한 후보들을 GRPO가 직접 평가하도록
+        # 중복 제거하고 다양성 확보를 위해 셔플
+        import random
+        random.shuffle(raw_candidates)
+        candidates = raw_candidates[:num_candidates]
+        
+        logger.info(f"🎯 다양한 후보 생성: {len(raw_candidates)}개 → {num_candidates}개 선택 (semantic filtering 없음)")
         
         # 후보가 부족하면 원본 프롬프트로 채움
         while len(candidates) < num_candidates:
@@ -391,10 +343,10 @@ class QWENModel:
         # 상태 표현 생성
         state_repr = self.get_grpo_state_representation(user_prompt)
         
-        # 후보 프롬프트들 생성 (설정에서 semantic filtering 옵션 사용)
+        # 후보 프롬프트들 생성 (semantic filtering 제거)
         candidates = self.generate_enhancement_candidates(
             user_prompt, 
-            use_semantic_filtering=self.grpo_config.use_semantic_filtering,
+            use_semantic_filtering=False,  # GRPO가 직접 학습하도록
             semantic_threshold=self.grpo_config.semantic_threshold
         )
         
