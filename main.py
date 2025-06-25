@@ -149,7 +149,8 @@ def main():
             model_name="Qwen/Qwen2-VL-7B-Instruct",
             device="accelerate",  # Accelerate 전용 모드
             temperature=0.7,
-            grpo_config=config  # GRPO 컴포넌트 활성화
+            grpo_config=config,  # GRPO 컴포넌트 활성화
+            is_main_process=accelerator.is_main_process  # Reference 모델 생성 여부
         )
         
         # Accelerate로 모델 준비 (단일 호출로 변경)
@@ -164,21 +165,32 @@ def main():
             torch.cuda.empty_cache()
             logger.info("🧹 QWEN 로드 후 메모리 정리")
         
-        # 2. 통합 모델들 로드 (GPU 4번, 5번)
-        logger.info("\n🎯 통합 모델들 로딩... (GPU 4번, 5번)")
+        # 2. 통합 모델들 로드 (GPU 4번, 5번) - 메인 프로세스에서만
+        logger.info("\n🎯 통합 모델들 로딩 체크...")
         
-        # CLIP 리워드 모델 (GPU 4번)
-        reward_model = CLIPReward(device="cuda:4")
-        logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 4)")
+        # 메인 프로세스에서만 로딩
+        if accelerator.is_main_process:
+            logger.info("🎯 메인 프로세스: 통합 모델들 로딩 (GPU 4번, 5번)")
+            
+            # CLIP 리워드 모델 (GPU 4번)
+            reward_model = CLIPReward(device="cuda:4")
+            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 4)")
+            
+            # Stable Diffusion 3 파이프라인 (GPU 5번) - 1개만 로딩
+            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:5")
+            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 5) - 1개만 로딩")
+            
+            # QWEN Reference 모델은 이미 qwen.py에서 GPU 4번으로 설정됨
+            if hasattr(qwen_model, 'ref_model') and qwen_model.ref_model is not None:
+                logger.info("✅ QWEN Reference 모델이 이미 GPU 4에 설정됨")
+        else:
+            # 서브 프로세스에서는 로딩하지 않음
+            logger.info("🎯 서브 프로세스: 통합 모델들 로딩 건너뛰기")
+            reward_model = None
+            sd_pipeline = None
         
-        # Stable Diffusion 3 파이프라인 (GPU 5번)
-        sd_pipeline = load_stable_diffusion_pipeline(device="cuda:5")
-        logger.info("✅ SD3 파이프라인 로드 완료 (GPU 5)")
-        
-        # QWEN Reference 모델을 GPU 4번으로 이동 (이미 생성되었다면)
-        if hasattr(qwen_model, 'ref_model') and qwen_model.ref_model is not None:
-            qwen_model.ref_model = qwen_model.ref_model.to("cuda:4")
-            logger.info("✅ QWEN Reference 모델을 GPU 4로 이동")
+        # 모든 프로세스 동기화 (메인 프로세스의 모델 로딩 완료 대기)
+        accelerator.wait_for_everyone()
         
         # 최종 메모리 정리
         if torch.cuda.is_available():

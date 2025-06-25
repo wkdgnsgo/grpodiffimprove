@@ -31,6 +31,9 @@ class QWENGRPOEnvironment:
         self.sd_pipeline = sd_pipeline
         self.config = config
         
+        # 멀티 프로세스 환경에서 메인 프로세스 여부 확인
+        self.is_main_process = reward_model is not None and sd_pipeline is not None
+        
         # GPU 디바이스 설정 (Accelerate 멀티 GPU 환경)
         self.qwen_device = "auto"         # Accelerate가 관리
         self.sd_device = "cuda:4"         # SD3 (GPU 4번)
@@ -76,6 +79,22 @@ class QWENGRPOEnvironment:
     
     def step(self, enhanced_prompt: str) -> Tuple[Dict, float, bool, Dict]:
         """환경 스텝 - QWEN에서 생성된 향상된 프롬프트 사용 (Accelerate 지원)"""
+        # 서브 프로세스에서는 더미 값 반환
+        if not self.is_main_process:
+            logger.info("🎯 서브 프로세스: 더미 값 반환")
+            next_state = {
+                'user_prompt': self.current_user_prompt,
+                'enhanced_prompt': enhanced_prompt,
+                'episode': self.episode_count
+            }
+            info = {
+                'original_prompt': self.current_user_prompt,
+                'enhanced_prompt': enhanced_prompt,
+                'original_reward': 0.5,
+                'enhanced_reward': 0.5
+            }
+            return next_state, 0.5, True, info
+        
         original_image = None
         enhanced_image = None
         original_reward = 0.0
@@ -84,7 +103,7 @@ class QWENGRPOEnvironment:
         
         try:
             # QWEN에서 이미 생성된 향상된 프롬프트 사용
-            logger.info(f"🧠 QWEN 생성된 프롬프트 사용 (Accelerate 분산)")
+            logger.info(f"🧠 QWEN 생성된 프롬프트 사용 (메인 프로세스)")
             
             self.current_enhanced_prompt = enhanced_prompt
             
@@ -285,6 +304,9 @@ class QWENGRPOTrainer:
         self.reward_model = reward_model
         self.sd_pipeline = sd_pipeline
         self.accelerator = None  # Accelerate 객체 (나중에 설정)
+        
+        # 멀티 프로세스 환경에서 메인 프로세스 여부 확인
+        self.is_main_process = reward_model is not None and sd_pipeline is not None
         
         # QWEN 모델에 GRPO 컴포넌트가 설정되어 있는지 확인
         if not hasattr(qwen_model, 'ref_model'):

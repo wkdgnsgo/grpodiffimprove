@@ -32,11 +32,12 @@ class QWENGRPOConfig:
 
 class QWENModel:
 
-    def __init__(self, model_name = "Qwen/Qwen2-VL-7B-Instruct", device = "cuda", temperature = 0.7, grpo_config: QWENGRPOConfig = None):
+    def __init__(self, model_name = "Qwen/Qwen2-VL-7B-Instruct", device = "cuda", temperature = 0.7, grpo_config: QWENGRPOConfig = None, is_main_process: bool = True):
         self.model_name = model_name
         self.device = device
         self.temperature = temperature
         self.grpo_config = grpo_config or QWENGRPOConfig()
+        self.is_main_process = is_main_process  # Accelerate 메인 프로세스 여부
 
         self._load_model()
         self._setup_prompt_template()
@@ -130,46 +131,51 @@ class QWENModel:
         
         logger.info("🔧 GRPO 컴포넌트 초기화 중... (메모리 최적화)")
         
-        # 참조 모델을 GPU 4번으로 강제 이동 (Accelerate 멀티 GPU 환경)
-        try:
-            # GPU 4번이 있으면 사용, 아니면 CPU 사용
-            if torch.cuda.device_count() > 4:
-                ref_device = "cuda:4"
-                logger.info("📍 Reference model을 GPU 4번으로 이동 (통합 GPU)")
-            elif torch.cuda.device_count() > 3:
-                ref_device = "cuda:3"
-                logger.info("📍 Reference model을 GPU 3번으로 이동")
-            else:
-                ref_device = "cpu"
-                logger.info("📍 Reference model을 CPU로 이동 (메모리 절약)")
-            
-            # 참조 모델 생성 (메모리 효율적)
-            from copy import deepcopy
-            
-            # 원본 모델을 CPU로 임시 이동
-            original_device = next(self.model.parameters()).device
-            logger.info(f"💾 Reference model 생성을 위해 임시 CPU 이동...")
-            
-            # CPU에서 복사 (메모리 절약)
-            self.model = self.model.cpu()
-            self.ref_model = deepcopy(self.model)
-            
-            # Reference model을 지정된 디바이스로 이동
-            self.ref_model = self.ref_model.to(ref_device)
-            self.ref_model.eval()
-            
-            # 원본 모델을 다시 원래 디바이스로 이동
-            self.model = self.model.to(original_device)
-            
-            # 참조 모델의 모든 파라미터를 freeze
-            for param in self.ref_model.parameters():
-                param.requires_grad = False
-            
-            logger.info(f"✅ Reference model 설정 완료 ({ref_device})")
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Reference model 설정 실패: {e}")
-            logger.info("🔄 Fallback: Reference model 없이 진행 (KL penalty 비활성화)")
+        # 참조 모델 생성 - 메인 프로세스에서만
+        if self.is_main_process:
+            try:
+                # GPU 4번이 있으면 사용, 아니면 CPU 사용
+                if torch.cuda.device_count() > 4:
+                    ref_device = "cuda:4"
+                    logger.info("📍 Reference model을 GPU 4번으로 이동 (메인 프로세스)")
+                elif torch.cuda.device_count() > 3:
+                    ref_device = "cuda:3"
+                    logger.info("📍 Reference model을 GPU 3번으로 이동 (메인 프로세스)")
+                else:
+                    ref_device = "cpu"
+                    logger.info("📍 Reference model을 CPU로 이동 (메인 프로세스)")
+                
+                # 참조 모델 생성 (메모리 효율적)
+                from copy import deepcopy
+                
+                # 원본 모델을 CPU로 임시 이동
+                original_device = next(self.model.parameters()).device
+                logger.info(f"💾 Reference model 생성을 위해 임시 CPU 이동...")
+                
+                # CPU에서 복사 (메모리 절약)
+                self.model = self.model.cpu()
+                self.ref_model = deepcopy(self.model)
+                
+                # Reference model을 지정된 디바이스로 이동
+                self.ref_model = self.ref_model.to(ref_device)
+                self.ref_model.eval()
+                
+                # 원본 모델을 다시 원래 디바이스로 이동
+                self.model = self.model.to(original_device)
+                
+                # 참조 모델의 모든 파라미터를 freeze
+                for param in self.ref_model.parameters():
+                    param.requires_grad = False
+                
+                logger.info(f"✅ Reference model 설정 완료 ({ref_device}) - 메인 프로세스")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Reference model 설정 실패: {e}")
+                logger.info("🔄 Fallback: Reference model 없이 진행 (KL penalty 비활성화)")
+                self.ref_model = None
+        else:
+            # 서브 프로세스에서는 Reference model 생성하지 않음
+            logger.info("🎯 서브 프로세스: Reference model 생성 건너뛰기")
             self.ref_model = None
         
         # 옵티마이저 (QWEN 모델만 학습)

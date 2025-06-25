@@ -5,7 +5,7 @@
 #SBATCH --nodelist=hpc-pr-a-pod20
 #SBATCH --ntasks-per-node=1 # total number of tasks per node
 #SBATCH --cpus-per-task=8 # cpu-cores per task (멀티 GPU + 추론 모델 처리용)
-#SBATCH --gres=gpu:5 # 5개 GPU 필요 (QWEN 분산: 0-3, 통합 모델: 4)
+#SBATCH --gres=gpu:6 # 6개 GPU 필요 (QWEN 분산: 0-3, CLIP: 4, SD3: 5)
 #SBATCH --time=16:00:00 # total run time limit (HH:MM:SS) - 멀티 GPU로 더 긴 학습
 #SBATCH --output=qwen_grpo_accelerate_training.out
 #SBATCH --error=qwen_grpo_accelerate_training.err
@@ -16,7 +16,7 @@
 # Accelerate 멀티 GPU 환경 변수 설정
 export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 export WORLD_SIZE=$(($SLURM_NNODES * SLURM_NTASKS_PER_NODE))
-export CUDA_VISIBLE_DEVICES=2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
 export TOKENIZERS_PARALLELISM=false
 export WANDB_DISABLED=true # WandB 비활성화 (선택사항)
 
@@ -26,17 +26,6 @@ echo "CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES
 master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=$master_addr
 echo "MASTER_ADDR="$MASTER_ADDR
-
-# 환경 활성화 (필요시)
-#conda activate torch-env
-
-# 필요한 패키지 설치 확인
-echo "=== 패키지 확인 ==="
-python -c "import torch; print(f'PyTorch: {torch.__version__}')"
-python -c "import accelerate; print(f'Accelerate: {accelerate.__version__}')"
-python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
-python -c "import diffusers; print(f'Diffusers: {diffusers.__version__}')"
-echo ""
 
 # GPU 정보 출력
 echo "=== GPU 정보 ==="
@@ -50,10 +39,11 @@ echo "  - GPU 0: QWEN 메인 모델 (1/4)"
 echo "  - GPU 1: QWEN 메인 모델 (2/4)"
 echo "  - GPU 2: QWEN 메인 모델 (3/4)"
 echo "  - GPU 3: QWEN 메인 모델 (4/4)"
-echo "GPU 4: 통합 추론 모델들"
-echo "  - Stable Diffusion 3 (이미지 생성)"
+echo "GPU 4: CLIP + Reference 모델"
 echo "  - CLIP 리워드 모델 (리워드 계산)"
 echo "  - QWEN Reference 모델 (KL penalty)"
+echo "GPU 5: Stable Diffusion 3 (1개만 로딩)"
+echo "  - SD3 파이프라인 (이미지 생성 전용)"
 echo ""
 
 # Accelerate 설정 자동 생성
@@ -65,7 +55,7 @@ compute_environment: LOCAL_MACHINE
 debug: false
 distributed_type: MULTI_GPU
 downcast_bf16: 'no'
-gpu_ids: '0,1,2,3'
+gpu_ids: '2,3,4,5,6,7'
 machine_rank: 0
 main_training_function: main
 mixed_precision: fp16
