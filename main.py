@@ -117,16 +117,16 @@ class SimpleGRPOTrainer:
         """각 GPU별 모델 초기화 - 메모리 최적화"""
         logger.info("🔧 모델들 초기화 중... (메모리 최적화)")
         
-        # GPU 0: QWEN LoRA 모델만 - 더 작은 모델 사용
+        # GPU 0: QWEN LoRA 모델만 - 7B 모델 사용
         qwen_device = "cuda:0" if self.use_gpu else "cpu"
-        logger.info(f"🧠 {qwen_device}: QWEN LoRA 모델 로딩... (더 작은 모델)")
+        logger.info(f"🧠 {qwen_device}: QWEN 7B LoRA 모델 로딩...")
         self.qwen_model = QWENModel(
-            model_name="Qwen/Qwen2-VL-2B-Instruct",  # 7B → 2B로 변경
+            model_name="Qwen/Qwen2-VL-7B-Instruct",  # 2B → 7B로 변경
             device=qwen_device,
             temperature=0.7,
             grpo_config=self.config
         )
-        logger.info(f"✅ QWEN 2B 모델 로드 완료 ({qwen_device})")
+        logger.info(f"✅ QWEN 7B 모델 로드 완료 ({qwen_device})")
         
         # GPU 1: CLIP 리워드 모델만
         clip_device = "cuda:1" if self.use_gpu and torch.cuda.device_count() > 1 else "cuda:0" if self.use_gpu else "cpu"
@@ -151,8 +151,8 @@ class SimpleGRPOTrainer:
         
         logger.info("🎯 모든 모델 초기화 완료!")
         logger.info("📋 GPU 할당:")
-        logger.info(f"  GPU 0: QWEN 2B LoRA 모델 ({qwen_device})")
-        logger.info(f"  GPU 1: CLIP 리워드 모델 + Reference 모델 ({clip_device})")
+        logger.info(f"  GPU 0: QWEN 7B LoRA 모델 ({qwen_device})")
+        logger.info(f"  GPU 1: CLIP 리워드 모델 + Reference 7B 모델 ({clip_device})")
         logger.info(f"  GPU 2: SD3 이미지 생성 ({sd_device})")
         logger.info("🔄 이미지는 GPU 2에서 생성 후 GPU 1로 이동하여 리워드 계산")
         logger.info("🔄 Reference 모델은 GPU 1에서 KL penalty 계산")
@@ -287,6 +287,120 @@ class SimpleGRPOTrainer:
             # 에러 시 개별 계산으로 fallback
             logger.info("🔄 개별 리워드 계산으로 fallback")
             return self.calculate_rewards(user_prompt, enhanced_prompts, images)
+    
+    def calculate_batch_clip_rewards(self, user_prompt: str, enhanced_prompts: List[str], images: List) -> List[float]:
+        """배치로 CLIP 리워드 계산"""
+        if not images or self.reward_model is None:
+            return [0.0] * len(enhanced_prompts)
+        
+        try:
+            # 배치로 리워드 계산
+            rewards = []
+            for image in images:
+                reward = self.reward_model.calculate_reward(user_prompt, image)
+                rewards.append(reward)
+            
+            return rewards
+            
+        except Exception as e:
+            logger.error(f"❌ 배치 CLIP 리워드 계산 실패: {e}")
+            return [0.0] * len(enhanced_prompts)
+    
+    def calculate_detailed_rewards_batch(self, user_prompt: str, enhanced_prompts: List[str], images: List) -> List[dict]:
+        """배치로 상세 리워드 계산 (CLIP, Aesthetic, Semantic 구분)"""
+        if not images or self.reward_model is None:
+            return [{'total_reward': 0.0, 'clip_score': 0.0, 'aesthetic_score': 0.0, 
+                    'semantic_similarity': 0.0, 'clip_penalty': 0.0, 'semantic_penalty': 0.0}] * len(enhanced_prompts)
+        
+        try:
+            detailed_rewards = []
+            for i, (enhanced_prompt, image) in enumerate(zip(enhanced_prompts, images)):
+                # 기본 CLIP 리워드
+                clip_score = self.reward_model.calculate_reward(user_prompt, image)
+                
+                # Aesthetic score (이미지 품질)
+                aesthetic_score = self.calculate_aesthetic_score(image)
+                
+                # Semantic similarity (프롬프트와 이미지의 의미적 유사성)
+                semantic_similarity = self.calculate_semantic_similarity(user_prompt, enhanced_prompt, image)
+                
+                # 패널티 계산
+                clip_penalty = max(0, 0.7 - clip_score) * 0.5  # CLIP 점수가 낮으면 패널티
+                semantic_penalty = max(0, 0.6 - semantic_similarity) * 0.3  # 의미적 유사성이 낮으면 패널티
+                
+                # 총 리워드 계산
+                total_reward = (clip_score * 0.5 + 
+                               aesthetic_score * 0.3 + 
+                               semantic_similarity * 0.2 - 
+                               clip_penalty - 
+                               semantic_penalty)
+                
+                detailed_reward = {
+                    'total_reward': max(0.0, total_reward),  # 음수 방지
+                    'clip_score': clip_score,
+                    'aesthetic_score': aesthetic_score,
+                    'semantic_similarity': semantic_similarity,
+                    'clip_penalty': clip_penalty,
+                    'semantic_penalty': semantic_penalty
+                }
+                detailed_rewards.append(detailed_reward)
+            
+            return detailed_rewards
+            
+        except Exception as e:
+            logger.error(f"❌ 상세 리워드 계산 실패: {e}")
+            return [{'total_reward': 0.0, 'clip_score': 0.0, 'aesthetic_score': 0.0, 
+                    'semantic_similarity': 0.0, 'clip_penalty': 0.0, 'semantic_penalty': 0.0}] * len(enhanced_prompts)
+    
+    def calculate_aesthetic_score(self, image) -> float:
+        """이미지 미적 품질 점수 계산 (간단한 휴리스틱)"""
+        try:
+            # PIL Image를 numpy array로 변환
+            import numpy as np
+            img_array = np.array(image)
+            
+            # 색상 다양성 계산
+            if len(img_array.shape) == 3:
+                color_variance = np.var(img_array, axis=(0, 1)).mean()
+                color_diversity = min(1.0, color_variance / 1000.0)
+            else:
+                color_diversity = 0.5
+            
+            # 대비 계산
+            gray = np.mean(img_array, axis=2) if len(img_array.shape) == 3 else img_array
+            contrast = np.std(gray) / 255.0
+            
+            # 전체적인 밝기 분포
+            brightness = np.mean(gray) / 255.0
+            brightness_score = 1.0 - abs(brightness - 0.5) * 2  # 중간 밝기가 최적
+            
+            # 종합 점수
+            aesthetic_score = (color_diversity * 0.4 + contrast * 0.4 + brightness_score * 0.2)
+            return min(1.0, max(0.0, aesthetic_score))
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 미적 점수 계산 실패: {e}")
+            return 0.5  # 기본값
+    
+    def calculate_semantic_similarity(self, user_prompt: str, enhanced_prompt: str, image) -> float:
+        """의미적 유사성 계산"""
+        try:
+            # CLIP을 사용해서 원본 프롬프트와 향상된 프롬프트의 이미지 유사성 비교
+            if self.reward_model is None:
+                return 0.5
+            
+            original_similarity = self.reward_model.calculate_reward(user_prompt, image)
+            enhanced_similarity = self.reward_model.calculate_reward(enhanced_prompt, image)
+            
+            # 원본 프롬프트와의 유사성을 기준으로 계산
+            # 향상된 프롬프트가 원본 의미를 유지하면서 개선되었는지 평가
+            semantic_score = original_similarity * 0.7 + enhanced_similarity * 0.3
+            
+            return min(1.0, max(0.0, semantic_score))
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 의미적 유사성 계산 실패: {e}")
+            return 0.5  # 기본값
     
     def collect_rollouts(self, prompts: List[str]) -> List[Dict]:
         """배치 롤아웃 수집 (Group-relative 방식)"""
@@ -505,29 +619,99 @@ class SimpleGRPOTrainer:
     
     def save_episode_images(self, epoch: int, user_prompt: str, enhanced_prompts: List[str], 
                            images: List, rewards: List[float]):
-        """에피소드별 이미지 저장"""
+        """에피소드별 상세 이미지 및 비교 분석 저장"""
         try:
-            epoch_dir = os.path.join(self.log_dir, "images", f"epoch_{epoch}")
-            os.makedirs(epoch_dir, exist_ok=True)
+            # 에피소드별 폴더 생성
+            episode_dir = os.path.join(self.log_dir, "episodes", f"episode_{epoch}")
+            os.makedirs(episode_dir, exist_ok=True)
             
-            for i, (enhanced_prompt, image, reward) in enumerate(zip(enhanced_prompts, images, rewards)):
+            # 1. 원본 프롬프트로 이미지 생성 (비교용)
+            logger.info(f"🔍 원본 프롬프트로 비교 이미지 생성: '{user_prompt}'")
+            original_images = self.generate_images_batch([user_prompt])
+            original_rewards = self.calculate_detailed_rewards_batch(user_prompt, [user_prompt], original_images)
+            
+            # 2. 향상된 프롬프트 이미지들과 함께 저장
+            for i, (enhanced_prompt, enhanced_image, enhanced_reward) in enumerate(zip(enhanced_prompts, images, rewards)):
                 # 이미지 저장
-                image_path = os.path.join(epoch_dir, f"image_{i}_reward_{reward:.3f}.png")
-                image.save(image_path)
+                original_image = original_images[0] if original_images else None
+                original_reward = original_rewards[0] if original_rewards else {}
+                enhanced_reward_detailed = self.calculate_detailed_rewards_batch(user_prompt, [enhanced_prompt], [enhanced_image])[0]
                 
-                # 프롬프트 정보 저장
-                info_path = os.path.join(epoch_dir, f"image_{i}_info.txt")
-                with open(info_path, 'w', encoding='utf-8') as f:
+                # 원본 이미지 저장
+                if original_image:
+                    original_path = os.path.join(episode_dir, f"sample_{i}_original.png")
+                    original_image.save(original_path)
+                
+                # 향상된 이미지 저장
+                enhanced_path = os.path.join(episode_dir, f"sample_{i}_enhanced.png")
+                enhanced_image.save(enhanced_path)
+                
+                # 상세 분석 텍스트 저장
+                analysis_path = os.path.join(episode_dir, f"sample_{i}_analysis.txt")
+                with open(analysis_path, 'w', encoding='utf-8') as f:
+                    f.write("=" * 60 + "\n")
+                    f.write(f"EPISODE {epoch} - SAMPLE {i} ANALYSIS\n")
+                    f.write("=" * 60 + "\n\n")
+                    
+                    f.write("📝 PROMPTS:\n")
                     f.write(f"Original Prompt: {user_prompt}\n")
-                    f.write(f"Enhanced Prompt: {enhanced_prompt}\n")
-                    f.write(f"CLIP Reward: {reward:.4f}\n")
+                    f.write(f"Enhanced Prompt: {enhanced_prompt}\n\n")
+                    
+                    f.write("🎨 IMAGES:\n")
+                    f.write(f"Original Image: sample_{i}_original.png\n")
+                    f.write(f"Enhanced Image: sample_{i}_enhanced.png\n\n")
+                    
+                    f.write("📊 REWARD ANALYSIS:\n")
+                    f.write("-" * 40 + "\n")
+                    
+                    # 원본 리워드 분석
+                    if original_reward:
+                        f.write("Original Prompt → Generated Image:\n")
+                        f.write(f"  Total Reward: {original_reward.get('total_reward', 0.0):.4f}\n")
+                        f.write(f"  CLIP Score: {original_reward.get('clip_score', 0.0):.4f}\n")
+                        f.write(f"  Aesthetic Score: {original_reward.get('aesthetic_score', 0.0):.4f}\n")
+                        f.write(f"  Semantic Similarity: {original_reward.get('semantic_similarity', 0.0):.4f}\n")
+                        f.write(f"  CLIP Penalty: {original_reward.get('clip_penalty', 0.0):.4f}\n")
+                        f.write(f"  Semantic Penalty: {original_reward.get('semantic_penalty', 0.0):.4f}\n\n")
+                    
+                    # 향상된 리워드 분석
+                    f.write("Enhanced Prompt → Generated Image:\n")
+                    f.write(f"  Total Reward: {enhanced_reward_detailed.get('total_reward', 0.0):.4f}\n")
+                    f.write(f"  CLIP Score: {enhanced_reward_detailed.get('clip_score', 0.0):.4f}\n")
+                    f.write(f"  Aesthetic Score: {enhanced_reward_detailed.get('aesthetic_score', 0.0):.4f}\n")
+                    f.write(f"  Semantic Similarity: {enhanced_reward_detailed.get('semantic_similarity', 0.0):.4f}\n")
+                    f.write(f"  CLIP Penalty: {enhanced_reward_detailed.get('clip_penalty', 0.0):.4f}\n")
+                    f.write(f"  Semantic Penalty: {enhanced_reward_detailed.get('semantic_penalty', 0.0):.4f}\n\n")
+                    
+                    # 개선도 분석
+                    if original_reward:
+                        f.write("🚀 IMPROVEMENT ANALYSIS:\n")
+                        f.write("-" * 40 + "\n")
+                        total_improvement = enhanced_reward_detailed.get('total_reward', 0.0) - original_reward.get('total_reward', 0.0)
+                        clip_improvement = enhanced_reward_detailed.get('clip_score', 0.0) - original_reward.get('clip_score', 0.0)
+                        aesthetic_improvement = enhanced_reward_detailed.get('aesthetic_score', 0.0) - original_reward.get('aesthetic_score', 0.0)
+                        semantic_improvement = enhanced_reward_detailed.get('semantic_similarity', 0.0) - original_reward.get('semantic_similarity', 0.0)
+                        
+                        f.write(f"Total Reward Change: {total_improvement:+.4f}\n")
+                        f.write(f"CLIP Score Change: {clip_improvement:+.4f}\n")
+                        f.write(f"Aesthetic Score Change: {aesthetic_improvement:+.4f}\n")
+                        f.write(f"Semantic Similarity Change: {semantic_improvement:+.4f}\n\n")
+                        
+                        # 개선 요약
+                        if total_improvement > 0:
+                            f.write("✅ ENHANCEMENT SUCCESSFUL - Overall improvement achieved\n")
+                        else:
+                            f.write("❌ ENHANCEMENT FAILED - Overall degradation occurred\n")
+                    
+                    f.write(f"\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"Epoch: {epoch}\n")
-                    f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             
-            logger.info(f"💾 에피소드 {epoch} 이미지 저장 완료: {len(images)}개")
+            logger.info(f"💾 에피소드 {epoch} 상세 분석 저장 완료: {len(images)}개 샘플")
             
         except Exception as e:
-            logger.error(f"❌ 이미지 저장 실패: {e}")
+            logger.error(f"❌ 에피소드 이미지 저장 실패: {e}")
+            import traceback
+            traceback.print_exc()
     
     def plot_training_metrics(self, epoch: int):
         """학습 메트릭 플롯 생성"""
@@ -680,13 +864,13 @@ def main():
     logger.info("  GPU 2: Stable Diffusion 3 Image Generation")
     logger.info("=" * 60)
     
-    # 설정 - 고성능 LoRA 최적화
+    # 설정 - QWEN 7B + 고성능 LoRA 최적화
     config = QWENGRPOConfig(
-        learning_rate=2e-4,  # 더 높은 학습률 (확장된 LoRA에 맞춤)
-        batch_size=3,  # 배치 크기 증가 (메모리 여유분 활용)
-        num_rollouts=3,  # 롤아웃 수 증가
+        learning_rate=1e-4,  # 7B 모델에 적합한 학습률
+        batch_size=2,  # 7B 모델에 맞는 배치 크기
+        num_rollouts=2,  # 7B 모델에 맞는 롤아웃 수
         max_prompt_length=77,
-        max_new_tokens=30,  # 토큰 수 증가
+        max_new_tokens=30,  # 토큰 수 유지
         temperature=1.2,
         top_p=0.9,
         top_k=100,
@@ -694,7 +878,7 @@ def main():
         clip_ratio=0.2,
         entropy_coef=0.01,
         save_images=True,
-        log_dir="grpo_enhanced_results"  # 새로운 결과 디렉토리
+        log_dir="grpo_7b_results"  # 7B 모델 전용 결과 디렉토리
     )
     
     try:
