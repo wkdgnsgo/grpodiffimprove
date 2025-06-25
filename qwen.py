@@ -196,6 +196,14 @@ class QWENModel:
     def _init_grpo_weights(self):
         """GRPO 가중치 초기화 (QWEN 직접 학습 방식에서는 불필요)"""
         pass
+    
+    def _get_model_for_generation(self):
+        """Accelerate/DDP 래핑된 모델에서 원본 모델 가져오기"""
+        # DistributedDataParallel로 래핑된 경우 .module로 접근
+        if hasattr(self.model, 'module'):
+            return self.model.module
+        # 일반 모델인 경우 그대로 반환
+        return self.model
 
     def enhance_prompt(self, user_prompt):
         """기본 프롬프트 향상 (GRPO 없이)"""
@@ -226,7 +234,8 @@ class QWENModel:
         
         # 생성
         with torch.no_grad():
-            outputs = self.model.generate(
+            model_for_gen = self._get_model_for_generation()
+            outputs = model_for_gen.generate(
                 **inputs,
                 generation_config=self.generation_config,
                 pad_token_id=self.tokenizer.pad_token_id
@@ -303,7 +312,8 @@ class QWENModel:
             )
             
             with torch.no_grad():
-                outputs = self.model.generate(
+                model_for_gen = self._get_model_for_generation()
+                outputs = model_for_gen.generate(
                     **inputs,
                     generation_config=temp_config,
                     pad_token_id=self.tokenizer.pad_token_id
@@ -416,7 +426,8 @@ class QWENModel:
             inputs = inputs.to(self.device)
         
         # QWEN 모델로 직접 생성 (gradient 계산)
-        outputs = self.model.generate(
+        model_for_gen = self._get_model_for_generation()
+        outputs = model_for_gen.generate(
             **inputs,
             generation_config=self.generation_config,
             pad_token_id=self.tokenizer.pad_token_id,
