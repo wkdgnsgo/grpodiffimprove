@@ -1,12 +1,12 @@
 compute_environment: LOCAL_MACHINE
 distributed_type: MULTI_GPU
 downcast_bf16: "no"
-gpu_ids: "0,1,2,3"
+gpu_ids: "0,1,2,3,4"
 machine_rank: 0
 main_training_function: main
 mixed_precision: fp16
 num_machines: 1
-num_processes: 4
+num_processes: 5
 rdzv_backend: static
 same_network: true
 tpu_env: []
@@ -14,8 +14,14 @@ tpu_use_cluster: false
 tpu_use_sudo: false
 use_cpu: false
 
+# LoRA 학습용 간단한 설정 (DeepSpeed 제거)
+# GPU 0-4: QWEN LoRA 분산 학습 (5개 프로세스)
+# GPU 5: CLIP Reward 모델
+# GPU 6: Stable Diffusion 3 모델
+# GPU 7: 여유 GPU (필요시 사용)
+
 # 메모리 최적화 설정
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 1
 dataloader_config:
   split_batches: true
 

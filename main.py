@@ -139,33 +139,36 @@ def main():
     logger.info(f"  - KL 계수: {config.kl_coef}")
     
     try:
-        # GPU 메모리 최적화 설정 (GPU 0 OOM 방지)
+        # GPU 메모리 최적화 설정 (LoRA 최적화)
         if torch.cuda.is_available():
             # 메모리 할당 최적화
             torch.cuda.empty_cache()
             
-            # GPU 메모리 제한 설정 (DeepSpeed ZeRO Stage 3 - 8 GPU)
-            # GPU 0-7에 대해 메모리 제한 설정
+            # GPU 메모리 제한 설정 (LoRA 최적화)
+            # GPU 0-4: QWEN LoRA 학습 (5개 프로세스)
+            # GPU 5: CLIP Reward 모델
+            # GPU 6: Stable Diffusion 3 모델
+            # GPU 7: 여유 GPU
             gpu_memory_fractions = {
-                0: 0.90,  # QWEN 메인 프로세스 (약간 낮게)
-                1: 0.95,  # QWEN 서브 프로세스
-                2: 0.95,  # QWEN 서브 프로세스
-                3: 0.95,  # QWEN 서브 프로세스
-                4: 0.95,  # CLIP 메인
-                5: 0.95,  # CLIP 백업
-                6: 0.95,  # SD3 메인
-                7: 0.95   # SD3 백업
+                0: 0.85,  # QWEN LoRA 프로세스 0
+                1: 0.90,  # QWEN LoRA 프로세스 1
+                2: 0.90,  # QWEN LoRA 프로세스 2
+                3: 0.90,  # QWEN LoRA 프로세스 3
+                4: 0.90,  # QWEN LoRA 프로세스 4
+                5: 0.95,  # CLIP Reward 모델
+                6: 0.95,  # Stable Diffusion 3
+                7: 0.95   # 여유 GPU
             }
             
             for gpu_id, fraction in gpu_memory_fractions.items():
                 if gpu_id < torch.cuda.device_count():
                     torch.cuda.set_per_process_memory_fraction(fraction, device=gpu_id)
-                    logger.info(f"🔧 GPU {gpu_id} 메모리 제한 설정: {int(fraction*100)}% (8 GPU 모드)")
+                    logger.info(f"🔧 GPU {gpu_id} 메모리 제한 설정: {int(fraction*100)}% (LoRA 모드)")
             
             # PyTorch 메모리 할당 최적화
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
             
-            logger.info("🧹 초기 GPU 메모리 정리 및 최적화 완료")
+            logger.info("🧹 초기 GPU 메모리 정리 및 최적화 완료 (LoRA 최적화)")
         
         # 1. QWEN VL 모델 로드 (Accelerate로 분산)
         logger.info("\n🧠 QWEN VL 모델 + 전체 학습 로딩... (DeepSpeed ZeRO Stage 3)")
@@ -189,23 +192,28 @@ def main():
             torch.cuda.empty_cache()
             logger.info("🧹 QWEN 로드 후 메모리 정리")
         
-        # 2. 통합 모델들 로드 (GPU 4번, 6번) - LoRA로 메모리 절약되어 모든 프로세스에서 로딩
-        logger.info("\n🎯 통합 모델들 로딩 (LoRA 메모리 절약으로 모든 프로세스 로딩)")
+        # 2. 통합 모델들 로드 (GPU 5,6번) - 메인 프로세스에서만 로딩
+        logger.info("\n🎯 통합 모델들 로딩 (메인 프로세스에서만)")
         
-        # 프로세스별 GPU 할당
-        process_id = accelerator.process_index
-        logger.info(f"🎯 프로세스 {process_id}: 통합 모델들 로딩")
-        
-        # CLIP 리워드 모델 (GPU 4번)
-        reward_model = CLIPReward(device="cuda:4")
-        logger.info(f"✅ 프로세스 {process_id}: CLIP 리워드 모델 로드 완료 (GPU 4)")
-        
-        # Stable Diffusion 3 파이프라인 (GPU 6번)
-        sd_pipeline = load_stable_diffusion_pipeline(device="cuda:6")
-        logger.info(f"✅ 프로세스 {process_id}: SD3 파이프라인 로드 완료 (GPU 6)")
-        
-        # Reference 모델은 LoRA 학습에서 비활성화
-        logger.info("🎯 LoRA 학습 모드: Reference 모델 비활성화")
+        # 메인 프로세스에서만 로딩
+        if accelerator.is_main_process:
+            logger.info("🎯 메인 프로세스: 통합 모델들 로딩")
+            
+            # CLIP 리워드 모델 (GPU 5번)
+            reward_model = CLIPReward(device="cuda:5")
+            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 5)")
+            
+            # Stable Diffusion 3 파이프라인 (GPU 6번)
+            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:6")
+            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 6)")
+            
+            # Reference 모델은 LoRA 학습에서 비활성화
+            logger.info("🎯 LoRA 학습 모드: Reference 모델 비활성화")
+        else:
+            # 서브 프로세스에서는 None으로 설정
+            logger.info(f"🎯 서브 프로세스 {accelerator.process_index}: 통합 모델들 건너뛰기")
+            reward_model = None
+            sd_pipeline = None
         
         # 모든 프로세스 동기화 (메인 프로세스의 모델 로딩 완료 대기)
         accelerator.wait_for_everyone()
@@ -223,9 +231,10 @@ def main():
         trainer.accelerator = accelerator
         trainer.process_id = accelerator.process_index
         
-        # 환경에도 process_id 설정
+        # 환경에도 accelerator 정보 설정
         trainer.env.process_id = accelerator.process_index
         trainer.env.is_main_process = accelerator.is_main_process
+        trainer.env.accelerator = accelerator
         
         logger.info(f"✅ 트레이너 초기화 완료 (LoRA + Accelerate, 프로세스 {accelerator.process_index})")
         
@@ -236,7 +245,7 @@ def main():
             logger.info(f"  {i+1}. '{prompt}'")
         
         # 5. 베이스라인 성능 측정 (메인 프로세스에서만)
-        if accelerator.is_main_process:
+        if accelerator.is_main_process and sd_pipeline is not None and reward_model is not None:
             logger.info("\n📊 베이스라인 성능 측정...")
             baseline_rewards = []
             
@@ -254,8 +263,8 @@ def main():
                 state = trainer.env.reset(test_prompt)
                 trainer.env.current_enhanced_prompt = enhanced_prompt
                 
-                # 이미지 생성 (GPU 5번)
-                with torch.cuda.device(5):
+                # 이미지 생성 (GPU 6번)
+                with torch.cuda.device(6):
                     enhanced_result = sd_pipeline(
                         prompt=enhanced_prompt,
                         num_inference_steps=20,
@@ -265,8 +274,8 @@ def main():
                     )
                     enhanced_image = enhanced_result.images[0]
                 
-                # 리워드 계산 (GPU 4번)
-                with torch.cuda.device(4):
+                # 리워드 계산 (GPU 5번)
+                with torch.cuda.device(5):
                     reward = reward_model.calculate_reward(
                         test_prompt,
                         enhanced_prompt,
@@ -283,7 +292,9 @@ def main():
             avg_baseline = sum(baseline_rewards) / len(baseline_rewards) if baseline_rewards else 0.5
             logger.info(f"📈 베이스라인 평균 리워드: {avg_baseline:.3f}")
         else:
-            avg_baseline = 0.5  # 다른 프로세스는 기본값
+            avg_baseline = 0.5  # 다른 프로세스나 모델이 없는 경우 기본값
+            if accelerator.is_main_process:
+                logger.info("\n📊 베이스라인 측정 건너뛰기 (모델 없음)")
         
         # 베이스라인 값을 모든 프로세스에 브로드캐스트
         if accelerator.num_processes > 1:
@@ -308,7 +319,7 @@ def main():
         logger.info("✅ 학습 완료!")
         
         # 7. 학습 후 성능 측정 (메인 프로세스에서만)
-        if accelerator.is_main_process:
+        if accelerator.is_main_process and sd_pipeline is not None and reward_model is not None:
             logger.info("\n📊 학습 후 성능 측정...")
             trained_rewards = []
             
@@ -321,8 +332,8 @@ def main():
                 state = trainer.env.reset(test_prompt)
                 trainer.env.current_enhanced_prompt = grpo_enhanced
                 
-                # 이미지 생성 (GPU 5번)
-                with torch.cuda.device(5):
+                # 이미지 생성 (GPU 6번)
+                with torch.cuda.device(6):
                     enhanced_result = sd_pipeline(
                         prompt=grpo_enhanced,
                         num_inference_steps=20,
@@ -332,8 +343,8 @@ def main():
                     )
                     enhanced_image = enhanced_result.images[0]
                 
-                # 리워드 계산 (GPU 4번)
-                with torch.cuda.device(4):
+                # 리워드 계산 (GPU 5번)
+                with torch.cuda.device(5):
                     reward = reward_model.calculate_reward(
                         test_prompt,
                         grpo_enhanced,
@@ -349,6 +360,10 @@ def main():
             
             avg_trained = sum(trained_rewards) / len(trained_rewards) if trained_rewards else avg_baseline
             logger.info(f"📈 학습 후 평균 리워드: {avg_trained:.3f}")
+        else:
+            avg_trained = avg_baseline  # 모델이 없는 경우 베이스라인과 동일
+            if accelerator.is_main_process:
+                logger.info("\n📊 학습 후 평가 건너뛰기 (모델 없음)")
             
             # 8. 결과 분석 및 저장 (메인 프로세스에서만)
             logger.info("\n📋 최종 결과:")

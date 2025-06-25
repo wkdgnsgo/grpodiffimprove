@@ -1,12 +1,12 @@
 #!/bin/bash
 
-#SBATCH --job-name=qwen-grpo-accelerate # QWEN GRPO Accelerate 멀티 GPU 학습
+#SBATCH --job-name=qwen-lora-grpo # QWEN LoRA GRPO 멀티 GPU 학습
 #SBATCH --nodes=1
-#SBATCH --nodelist=hpc-pr-a-pod20
+#SBATCH --nodelist=hpc-pr-a-pod14
 #SBATCH --ntasks-per-node=1 # total number of tasks per node
 #SBATCH --cpus-per-task=8 # cpu-cores per task (멀티 GPU + 추론 모델 처리용)
-#SBATCH --gres=gpu:8 # 8개 GPU 필요 (QWEN 전체학습: 0-3, CLIP: 4-5, SD3: 6-7)
-#SBATCH --time=10:00:00 # total run time limit (HH:MM:SS) - 멀티 GPU로 더 긴 학습
+#SBATCH --gres=gpu:8 # 8개 GPU 필요 (QWEN LoRA: 0-4, CLIP: 5, SD3: 6, 여유: 7)
+#SBATCH --time=08:00:00 # total run time limit (HH:MM:SS) - LoRA로 더 빠른 학습
 #SBATCH --output=qwen_grpo_accelerate_training.out
 #SBATCH --error=qwen_grpo_accelerate_training.err
 #SBATCH --mail-type=begin # send email when job begins
@@ -34,19 +34,17 @@ echo "=== GPU 정보 ==="
 nvidia-smi
 echo ""
 
-# GPU 배치 정보 출력 (DeepSpeed ZeRO Stage 3 전체 학습 - 8 GPU)
-echo "=== GPU 배치 계획 (DeepSpeed ZeRO Stage 3 전체 학습 - 8 GPU) ==="
-echo "GPU 0-3: QWEN 전체 학습 (DeepSpeed ZeRO Stage 3 분산)"
-echo "  - GPU 0: QWEN 메인 프로세스 (1/4)"
-echo "  - GPU 1: QWEN 서브 프로세스 (2/4)"
-echo "  - GPU 2: QWEN 서브 프로세스 (3/4)"
-echo "  - GPU 3: QWEN 서브 프로세스 (4/4)"
-echo "GPU 4-5: CLIP 리워드 모델 (이중화)"
-echo "  - GPU 4: CLIP 메인"
-echo "  - GPU 5: CLIP 백업"
-echo "GPU 6-7: Stable Diffusion 3 (이중화)"
-echo "  - GPU 6: SD3 메인"
-echo "  - GPU 7: SD3 백업"
+# GPU 배치 정보 출력 (LoRA 최적화 - 8 GPU)
+echo "=== GPU 배치 계획 (LoRA 최적화 - 8 GPU) ==="
+echo "GPU 0-4: QWEN LoRA 학습 (Accelerate 분산)"
+echo "  - GPU 0: QWEN LoRA 프로세스 1/5"
+echo "  - GPU 1: QWEN LoRA 프로세스 2/5"
+echo "  - GPU 2: QWEN LoRA 프로세스 3/5"
+echo "  - GPU 3: QWEN LoRA 프로세스 4/5"
+echo "  - GPU 4: QWEN LoRA 프로세스 5/5"
+echo "GPU 5: CLIP 리워드 모델"
+echo "GPU 6: Stable Diffusion 3"
+echo "GPU 7: 여유 GPU (필요시 사용)"
 echo ""
 
 # Accelerate 설정 자동 생성
@@ -58,12 +56,12 @@ compute_environment: LOCAL_MACHINE
 debug: false
 distributed_type: MULTI_GPU
 downcast_bf16: 'no'
-gpu_ids: '0,1,2,3'
+gpu_ids: '0,1,2,3,4,5,6,7'
 machine_rank: 0
 main_training_function: main
 mixed_precision: fp16
 num_machines: 1
-num_processes: 4
+num_processes: 5
 rdzv_backend: static
 same_network: true
 tpu_env: []

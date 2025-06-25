@@ -36,9 +36,9 @@ class QWENGRPOEnvironment:
         
         # GPU 디바이스 설정 (Accelerate 멀티 GPU 환경)
         self.qwen_device = "auto"         # Accelerate가 관리
-        self.sd_device = "cuda:6"         # SD3 (GPU 6번 메인)
-        self.reward_device = "cuda:4"     # CLIP Reward (GPU 4번 메인)
-        self.ref_device = "cuda:4"        # Reference model (GPU 4번 메인)
+        self.sd_device = "cuda:6"         # SD3 (GPU 6번)
+        self.reward_device = "cuda:5"     # CLIP Reward (GPU 5번)
+        self.ref_device = "cuda:5"        # Reference model (GPU 5번)
         
         self.current_user_prompt = ""
         self.current_enhanced_prompt = ""
@@ -78,141 +78,27 @@ class QWENGRPOEnvironment:
         }
     
     def step(self, enhanced_prompt: str) -> Tuple[Dict, float, bool, Dict]:
-        """환경 스텝 - QWEN에서 생성된 향상된 프롬프트 사용 (LoRA 모든 프로세스 지원)"""
-        # LoRA로 메모리 절약되어 모든 프로세스에서 실제 계산 수행
-        process_id = getattr(self, 'process_id', 0)
-        logger.info(f"🎯 프로세스 {process_id}: 실제 리워드 계산 수행")
+        """환경 스텝 - 단순화된 버전 (배치 처리는 trainer에서 담당)"""
+        # 기본 리워드 반환 (실제 처리는 trainer의 배치 메서드에서 수행)
+        reward = 0.3  # 기본 리워드
         
-        original_image = None
-        enhanced_image = None
-        original_reward = 0.0
-        enhanced_reward = 0.0
-        total_reward = 0.0
+        next_state = {
+            'user_prompt': self.current_user_prompt,
+            'enhanced_prompt': enhanced_prompt,
+            'episode': self.episode_count
+        }
         
-        try:
-            # QWEN에서 이미 생성된 향상된 프롬프트 사용
-            logger.info(f"🧠 QWEN 생성된 프롬프트 사용 (메인 프로세스)")
-            
-            self.current_enhanced_prompt = enhanced_prompt
-            
-            logger.info(f"✅ 사용된 프롬프트: '{enhanced_prompt[:50]}...'")
-            
-            # 이미지 생성 시도 (GPU 6번)
-            try:
-                logger.info(f"🖼️  이미지 생성 시작 (GPU 6번 - SD3 메인)")
-                
-                with torch.cuda.device(6):
-                    # 원본 프롬프트로 이미지 생성
-                    original_result = self.sd_pipeline(
-                        prompt=self.current_user_prompt,
-                        num_inference_steps=28,
-                        guidance_scale=7.0,
-                        height=1024,
-                        width=1024
-                    )
-                    original_image = original_result.images[0]
-                    
-                    # 향상된 프롬프트로 이미지 생성
-                    enhanced_result = self.sd_pipeline(
-                        prompt=self.current_enhanced_prompt,
-                        num_inference_steps=28,
-                        guidance_scale=7.0,
-                        height=1024,
-                        width=1024
-                    )
-                    enhanced_image = enhanced_result.images[0]
-                
-                logger.info(f"✅ 이미지 생성 완료")
-                
-            except Exception as img_error:
-                logger.error(f"❌ 이미지 생성 실패: {img_error}")
-                # 더미 이미지 생성 (검은 이미지)
-                from PIL import Image
-                original_image = Image.new('RGB', (1024, 1024), color='black')
-                enhanced_image = Image.new('RGB', (1024, 1024), color='black')
-            
-            # 리워드 계산 시도 (GPU 4번)
-            try:
-                logger.info(f"🎯 리워드 계산 시작 (GPU 4번 - CLIP 메인)")
-                
-                # CLIP 리워드를 GPU 4에서 계산
-                with torch.cuda.device(4):
-                    enhanced_reward = self.reward_model.calculate_reward(
-                        self.current_user_prompt,
-                        self.current_enhanced_prompt,
-                        enhanced_image
-                    )
-                    
-                    # 원본 프롬프트 vs 원본 이미지 (참고용)
-                    original_reward = self.reward_model.calculate_reward(
-                        self.current_user_prompt,
-                        self.current_user_prompt,
-                        original_image
-                    )
-                
-                # 리워드 계산
-                total_reward = enhanced_reward
-                
-                logger.info(f"✅ 리워드 계산 완료: {total_reward:.4f}")
-                
-            except Exception as reward_error:
-                logger.error(f"❌ 리워드 계산 실패: {reward_error}")
-                # 기본 리워드 값 사용
-                original_reward = 0.1
-                enhanced_reward = 0.1
-                total_reward = 0.1
-            
-            # 다음 상태 (에피소드 완료)
-            next_state = {
-                'user_prompt': self.current_user_prompt,
-                'enhanced_prompt': self.current_enhanced_prompt,
-                'episode': self.episode_count
-            }
-            
-            info = {
-                'original_prompt': self.current_user_prompt,
-                'enhanced_prompt': self.current_enhanced_prompt,
-                'original_reward': original_reward,
-                'enhanced_reward': enhanced_reward
-            }
-            
-            # 한 스텝으로 완료 (done=True)
-            return next_state, total_reward, True, info
-            
-        except Exception as e:
-            logger.error(f"❌ 전체 스텝 실패: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            next_state = {
-                'user_prompt': self.current_user_prompt,
-                'enhanced_prompt': self.current_user_prompt,
-                'episode': self.episode_count
-            }
-            
-            info = {
-                'original_prompt': self.current_user_prompt,
-                'enhanced_prompt': self.current_user_prompt,
-                'original_reward': 0.0,
-                'enhanced_reward': 0.0,
-                'error': str(e)
-            }
-            
-            return next_state, 0.0, True, info
+        info = {
+            'original_prompt': self.current_user_prompt,
+            'enhanced_prompt': enhanced_prompt,
+            'original_reward': reward,
+            'enhanced_reward': reward
+        }
         
-        finally:
-            # 에러 발생 여부와 관계없이 항상 이미지 저장 시도
-            if self.config.save_images and original_image is not None and enhanced_image is not None:
-                try:
-                    self._save_episode_results(
-                        original_image, enhanced_image, 
-                        original_reward, enhanced_reward, total_reward,
-                        enhanced_prompt
-                    )
-                except Exception as save_error:
-                    logger.warning(f"⚠️ 이미지 저장 실패: {save_error}")
-                    # 에러 정보라도 저장
-                    self._save_error_log(enhanced_prompt, str(save_error))
+        # 에피소드 카운터 증가
+        self.episode_count += 1
+        
+        return next_state, reward, True, info
     
     def _save_episode_results(self, original_image, enhanced_image, original_reward, enhanced_reward, total_reward, enhanced_prompt):
         """에피소드 결과 저장"""
@@ -320,67 +206,132 @@ class QWENGRPOTrainer:
         logger.info(f"📊 플롯 저장 디렉토리: {self.plot_save_dir}")
     
     def collect_rollouts(self, prompts: List[str], is_baseline: bool = False) -> List[Dict]:
-        """롤아웃 수집"""
+        """롤아웃 수집 - 배치 이미지 생성 최적화"""
         all_experiences = []
         rollout_type = "베이스라인" if is_baseline else "학습용"
         
         for prompt_idx, user_prompt in enumerate(prompts):
             logger.info(f"\n📝 {rollout_type} 프롬프트 {prompt_idx + 1}/{len(prompts)}: '{user_prompt}'")
             
-            # 프롬프트별 롤아웃 수집
-            for rollout_idx in range(self.config.num_rollouts):
-                logger.info(f"  🎲 {rollout_type} 롤아웃 {rollout_idx + 1}/{self.config.num_rollouts}")
-                
-                try:
-                    # 환경 리셋 (베이스라인일 때는 이미지 저장 안함)
-                    if is_baseline:
-                        # 베이스라인 수집 시에는 이미지 저장 비활성화
-                        original_save_setting = self.config.save_images
-                        self.config.save_images = False
-                    
-                    state = self.env.reset(user_prompt)
-                    
-                    # QWEN GRPO로 향상된 프롬프트 생성 (Accelerate 분산)
-                    if self.accelerator:
-                        with self.accelerator.device:
-                            enhanced_prompt, log_prob = self.qwen_model.generate_grpo_enhanced_prompt(user_prompt)
-                    else:
-                        enhanced_prompt, log_prob = self.qwen_model.generate_grpo_enhanced_prompt(user_prompt)
-                    
-                    logger.info(f"    🎯 생성된 프롬프트: '{enhanced_prompt[:50]}...' (로그 확률: {log_prob:.4f})")
-                    
-                    # 환경 스텝 실행
-                    next_state, reward, done, info = self.env.step(enhanced_prompt)
-                    
-                    # 베이스라인일 때는 설정 복원
-                    if is_baseline:
-                        self.config.save_images = original_save_setting
-                    
-                    if next_state is not None:
-                        # 경험 저장
-                        experience = {
-                            'user_prompt': user_prompt,
-                            'enhanced_prompt': enhanced_prompt,
-                            'log_prob': log_prob,
-                            'reward': reward,
-                            'info': info,
-                            'is_baseline': is_baseline
-                        }
-                        
-                        all_experiences.append(experience)
-                        logger.info(f"    ✅ {rollout_type} 리워드: {reward:.4f}")
-                    else:
-                        logger.warning(f"    ❌ {rollout_type} 롤아웃 실패")
-                
-                except Exception as e:
-                    logger.error(f"    ❌ {rollout_type} 롤아웃 오류: {e}")
-                    # 베이스라인일 때 설정 복원 (에러 상황에서도)
-                    if is_baseline and 'original_save_setting' in locals():
-                        self.config.save_images = original_save_setting
-                    continue
+            # 배치 롤아웃 수집 (모든 프로세스의 프롬프트를 한번에 처리)
+            batch_experiences = self.collect_batch_rollouts(user_prompt, is_baseline)
+            all_experiences.extend(batch_experiences)
         
         logger.info(f"\n📊 수집된 {rollout_type} 경험: {len(all_experiences)}개")
         return all_experiences
+    
+    def collect_batch_rollouts(self, user_prompt: str, is_baseline: bool = False) -> List[Dict]:
+        """배치 롤아웃 수집 - 메인 프로세스에서 배치 이미지 생성"""
+        batch_experiences = []
+        
+        # 모든 프로세스에서 향상된 프롬프트 생성
+        enhanced_prompts = []
+        log_probs = []
+        
+        for rollout_idx in range(self.config.num_rollouts):
+            logger.info(f"  🎲 롤아웃 {rollout_idx + 1}/{self.config.num_rollouts}")
+            
+            try:
+                # QWEN GRPO로 향상된 프롬프트 생성
+                if self.accelerator:
+                    with self.accelerator.device:
+                        enhanced_prompt, log_prob = self.qwen_model.generate_grpo_enhanced_prompt(user_prompt)
+                else:
+                    enhanced_prompt, log_prob = self.qwen_model.generate_grpo_enhanced_prompt(user_prompt)
+                
+                enhanced_prompts.append(enhanced_prompt)
+                log_probs.append(log_prob)
+                logger.info(f"    🎯 생성된 프롬프트: '{enhanced_prompt[:50]}...' (로그 확률: {log_prob:.4f})")
+                
+            except Exception as e:
+                logger.error(f"    ❌ 프롬프트 생성 오류: {e}")
+                continue
+        
+        # 배치 이미지 생성 및 리워드 계산 (메인 프로세스에서만)
+        if self.accelerator and self.accelerator.is_main_process and enhanced_prompts:
+            batch_rewards = self.generate_batch_images_and_rewards(user_prompt, enhanced_prompts)
+        else:
+            # 서브 프로세스는 기본 리워드 사용
+            batch_rewards = [0.3] * len(enhanced_prompts)
+        
+        # 모든 프로세스에 리워드 분배
+        if self.accelerator and self.accelerator.num_processes > 1:
+            # 리워드를 모든 프로세스에 브로드캐스트
+            if self.accelerator.is_main_process:
+                rewards_tensor = torch.tensor(batch_rewards, device=self.accelerator.device)
+            else:
+                rewards_tensor = torch.zeros(len(enhanced_prompts), device=self.accelerator.device)
+            
+            # 브로드캐스트
+            rewards_tensor = self.accelerator.broadcast(rewards_tensor, from_process=0)
+            batch_rewards = rewards_tensor.cpu().tolist()
+        
+        # 경험 생성
+        for enhanced_prompt, log_prob, reward in zip(enhanced_prompts, log_probs, batch_rewards):
+            experience = {
+                'user_prompt': user_prompt,
+                'enhanced_prompt': enhanced_prompt,
+                'log_prob': log_prob,
+                'reward': reward,
+                'info': {
+                    'original_prompt': user_prompt,
+                    'enhanced_prompt': enhanced_prompt,
+                    'original_reward': reward,
+                    'enhanced_reward': reward
+                },
+                'is_baseline': is_baseline
+            }
+            batch_experiences.append(experience)
+            logger.info(f"    ✅ 리워드: {reward:.4f}")
+        
+        return batch_experiences
+    
+    def generate_batch_images_and_rewards(self, user_prompt: str, enhanced_prompts: List[str]) -> List[float]:
+        """배치 이미지 생성 및 리워드 계산 (메인 프로세스 전용)"""
+        logger.info(f"🖼️ 배치 이미지 생성 시작 ({len(enhanced_prompts)}개)")
+        
+        batch_rewards = []
+        available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        
+        try:
+            # 배치 이미지 생성 및 리워드 계산
+            for i, enhanced_prompt in enumerate(enhanced_prompts):
+                # 이미지 생성 (GPU 6번에서 SD3 사용)
+                if available_gpus > 6 and hasattr(self, 'sd_pipeline') and self.sd_pipeline is not None:
+                    with torch.cuda.device(6):
+                        enhanced_result = self.sd_pipeline(
+                            prompt=enhanced_prompt,
+                            num_inference_steps=28,
+                            guidance_scale=7.0,
+                            height=1024,
+                            width=1024
+                        )
+                        enhanced_image = enhanced_result.images[0]
+                else:
+                    # SD3가 없는 경우 더미 이미지
+                    from PIL import Image
+                    enhanced_image = Image.new('RGB', (1024, 1024), color='black')
+                
+                # 리워드 계산 (GPU 5번에서 CLIP 사용)
+                if available_gpus > 5 and hasattr(self, 'reward_model') and self.reward_model is not None:
+                    with torch.cuda.device(5):
+                        reward = self.reward_model.calculate_reward(
+                            user_prompt,
+                            enhanced_prompt,
+                            enhanced_image
+                        )
+                else:
+                    reward = 0.3  # 기본 리워드
+                
+                batch_rewards.append(reward)
+                logger.info(f"  이미지 {i+1}/{len(enhanced_prompts)}: 리워드 {reward:.4f}")
+                
+        except Exception as e:
+            logger.error(f"❌ 배치 이미지 생성 실패: {e}")
+            batch_rewards = [0.1] * len(enhanced_prompts)  # 에러 시 낮은 리워드
+        
+        logger.info(f"✅ 배치 처리 완료: 평균 리워드 {sum(batch_rewards)/len(batch_rewards):.4f}")
+        return batch_rewards
     
     def compute_grpo_advantages(self, experiences: List[Dict]) -> List[Dict]:
         """GRPO 어드밴티지 계산 (그룹 평균 baseline)"""
