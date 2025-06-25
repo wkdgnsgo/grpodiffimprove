@@ -11,6 +11,9 @@ import logging
 import os
 from typing import List, Dict
 import time
+import matplotlib.pyplot as plt
+import numpy as np
+from datetime import datetime
 
 from qwen import QWENModel, QWENGRPOConfig
 from clip_reward import CLIPReward
@@ -78,6 +81,21 @@ class SimpleGRPOTrainer:
     
     def __init__(self, config: QWENGRPOConfig):
         self.config = config
+        
+        # 로깅 디렉토리 설정
+        self.log_dir = config.log_dir
+        os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.log_dir, "images"), exist_ok=True)
+        os.makedirs(os.path.join(self.log_dir, "plots"), exist_ok=True)
+        
+        # 학습 메트릭 추적
+        self.training_metrics = {
+            'epoch_rewards': [],
+            'policy_losses': [],
+            'kl_divergences': [],
+            'advantages': [],
+            'epoch_times': []
+        }
         
         # GPU 가용성 확인
         if not torch.cuda.is_available():
@@ -327,6 +345,63 @@ class SimpleGRPOTrainer:
         
         return batch_experiences
     
+    def collect_rollouts_with_logging(self, prompts: List[str], epoch: int) -> List[Dict]:
+        """로깅 기능이 포함된 배치 롤아웃 수집"""
+        all_experiences = []
+        
+        # 배치 단위로 처리
+        batch_size = min(len(prompts), self.config.batch_size)
+        
+        for batch_start in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[batch_start:batch_start + batch_size]
+            logger.info(f"\n📦 에포크 {epoch} 배치 {batch_start//batch_size + 1}: {len(batch_prompts)}개 프롬프트")
+            
+            batch_experiences = []
+            
+            for prompt_idx, user_prompt in enumerate(batch_prompts):
+                logger.info(f"📝 프롬프트 {prompt_idx + 1}/{len(batch_prompts)}: '{user_prompt}'")
+                
+                # 1단계: 향상된 프롬프트 생성 (GPU 0)
+                enhanced_data = self.generate_enhanced_prompts(user_prompt, self.config.num_rollouts)
+                
+                if not enhanced_data:
+                    logger.warning(f"⚠️ 프롬프트 생성 실패, 건너뛰기")
+                    continue
+                
+                enhanced_prompts = [data[0] for data in enhanced_data]
+                log_probs = [data[1] for data in enhanced_data]
+                
+                # 2단계: 배치 이미지 생성 (GPU 2)  
+                images = self.generate_images_batch(enhanced_prompts)
+                
+                # 3단계: 배치 리워드 계산 (GPU 1) - original user prompt 사용
+                rewards = self.calculate_rewards_batch(user_prompt, enhanced_prompts, images)
+                
+                # 4단계: 이미지 저장 (로깅)
+                if self.config.save_images:
+                    self.save_episode_images(epoch, user_prompt, enhanced_prompts, images, rewards)
+                
+                # 경험 저장
+                for enhanced_prompt, log_prob, reward in zip(enhanced_prompts, log_probs, rewards):
+                    experience = {
+                        'user_prompt': user_prompt,
+                        'enhanced_prompt': enhanced_prompt,
+                        'log_prob': log_prob,
+                        'reward': reward,
+                        'info': {
+                            'original_prompt': user_prompt,
+                            'enhanced_prompt': enhanced_prompt,
+                            'clip_reward': reward,  # CLIP은 original user prompt로 계산됨
+                            'epoch': epoch
+                        }
+                    }
+                    batch_experiences.append(experience)
+            
+            all_experiences.extend(batch_experiences)
+        
+        logger.info(f"\n📊 에포크 {epoch} 총 수집된 경험: {len(all_experiences)}개")
+        return all_experiences
+    
     def update_policy(self, experiences: List[Dict]) -> Dict:
         """Group-relative 정책 업데이트 (GPU 0에서 실행)"""
         logger.info(f"🔄 Group-relative 정책 업데이트 ({len(experiences)}개 경험)")
@@ -428,6 +503,125 @@ class SimpleGRPOTrainer:
         logger.info(f"✅ Group-relative advantage 적용 완료")
         return enhanced_experiences
     
+    def save_episode_images(self, epoch: int, user_prompt: str, enhanced_prompts: List[str], 
+                           images: List, rewards: List[float]):
+        """에피소드별 이미지 저장"""
+        try:
+            epoch_dir = os.path.join(self.log_dir, "images", f"epoch_{epoch}")
+            os.makedirs(epoch_dir, exist_ok=True)
+            
+            for i, (enhanced_prompt, image, reward) in enumerate(zip(enhanced_prompts, images, rewards)):
+                # 이미지 저장
+                image_path = os.path.join(epoch_dir, f"image_{i}_reward_{reward:.3f}.png")
+                image.save(image_path)
+                
+                # 프롬프트 정보 저장
+                info_path = os.path.join(epoch_dir, f"image_{i}_info.txt")
+                with open(info_path, 'w', encoding='utf-8') as f:
+                    f.write(f"Original Prompt: {user_prompt}\n")
+                    f.write(f"Enhanced Prompt: {enhanced_prompt}\n")
+                    f.write(f"CLIP Reward: {reward:.4f}\n")
+                    f.write(f"Epoch: {epoch}\n")
+                    f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            
+            logger.info(f"💾 에피소드 {epoch} 이미지 저장 완료: {len(images)}개")
+            
+        except Exception as e:
+            logger.error(f"❌ 이미지 저장 실패: {e}")
+    
+    def plot_training_metrics(self, epoch: int):
+        """학습 메트릭 플롯 생성"""
+        try:
+            if not self.training_metrics['epoch_rewards']:
+                return
+            
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            fig.suptitle(f'GRPO Training Metrics - Epoch {epoch}', fontsize=16)
+            
+            # 1. 리워드 추이
+            axes[0, 0].plot(self.training_metrics['epoch_rewards'], 'b-o', linewidth=2, markersize=6)
+            axes[0, 0].set_title('Average Reward per Epoch')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('Average Reward')
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            # 2. Policy Loss 추이
+            if self.training_metrics['policy_losses']:
+                axes[0, 1].plot(self.training_metrics['policy_losses'], 'r-o', linewidth=2, markersize=6)
+                axes[0, 1].set_title('Policy Loss per Epoch')
+                axes[0, 1].set_xlabel('Epoch')
+                axes[0, 1].set_ylabel('Policy Loss')
+                axes[0, 1].grid(True, alpha=0.3)
+            
+            # 3. KL Divergence 추이
+            if self.training_metrics['kl_divergences']:
+                axes[1, 0].plot(self.training_metrics['kl_divergences'], 'g-o', linewidth=2, markersize=6)
+                axes[1, 0].set_title('KL Divergence per Epoch')
+                axes[1, 0].set_xlabel('Epoch')
+                axes[1, 0].set_ylabel('KL Divergence')
+                axes[1, 0].grid(True, alpha=0.3)
+            
+            # 4. Advantage 분포 (최근 에피소드)
+            if self.training_metrics['advantages']:
+                recent_advantages = self.training_metrics['advantages'][-50:]  # 최근 50개
+                axes[1, 1].hist(recent_advantages, bins=20, alpha=0.7, color='purple', edgecolor='black')
+                axes[1, 1].set_title('Recent Advantage Distribution')
+                axes[1, 1].set_xlabel('Advantage Value')
+                axes[1, 1].set_ylabel('Frequency')
+                axes[1, 1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # 플롯 저장
+            plot_path = os.path.join(self.log_dir, "plots", f"training_metrics_epoch_{epoch}.png")
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            logger.info(f"📊 에피소드 {epoch} 메트릭 플롯 저장 완료")
+            
+        except Exception as e:
+            logger.error(f"❌ 플롯 생성 실패: {e}")
+    
+    def log_epoch_metrics(self, epoch: int, experiences: List[Dict], metrics: Dict):
+        """에피소드 메트릭 로깅"""
+        # 리워드 통계
+        rewards = [exp['reward'] for exp in experiences]
+        avg_reward = sum(rewards) / len(rewards) if rewards else 0.0
+        
+        # 메트릭 저장
+        self.training_metrics['epoch_rewards'].append(avg_reward)
+        if 'policy_loss' in metrics:
+            self.training_metrics['policy_losses'].append(metrics['policy_loss'])
+        if 'kl_div' in metrics:
+            self.training_metrics['kl_divergences'].append(metrics['kl_div'])
+        
+        # Advantage 저장
+        for exp in experiences:
+            if 'group_advantage' in exp:
+                self.training_metrics['advantages'].append(exp['group_advantage'])
+        
+        # 상세 로그 출력
+        logger.info(f"📈 에피소드 {epoch} 상세 메트릭:")
+        logger.info(f"  📊 평균 리워드: {avg_reward:.4f}")
+        logger.info(f"  📊 리워드 범위: {min(rewards):.4f} ~ {max(rewards):.4f}")
+        logger.info(f"  📊 경험 수: {len(experiences)}")
+        
+        if metrics:
+            for key, value in metrics.items():
+                logger.info(f"  📊 {key}: {value:.4f}")
+        
+        # CSV 로그 저장
+        csv_path = os.path.join(self.log_dir, "training_log.csv")
+        if not os.path.exists(csv_path):
+            with open(csv_path, 'w') as f:
+                f.write("epoch,avg_reward,min_reward,max_reward,num_experiences,policy_loss,kl_div\n")
+        
+        with open(csv_path, 'a') as f:
+            policy_loss = metrics.get('policy_loss', 0.0)
+            kl_div = metrics.get('kl_div', 0.0)
+            f.write(f"{epoch},{avg_reward:.4f},{min(rewards):.4f},{max(rewards):.4f},"
+                   f"{len(experiences)},{policy_loss:.4f},{kl_div:.4f}\n")
+    
     def train(self, num_epochs: int = 5):
         """메인 학습 루프"""
         logger.info(f"🚀 Simple GRPO 학습 시작 ({num_epochs} 에포크)")
@@ -436,11 +630,12 @@ class SimpleGRPOTrainer:
         training_prompts = get_training_prompts()
         
         for epoch in range(num_epochs):
+            epoch_start_time = time.time()
             logger.info(f"\n🎯 에포크 {epoch + 1}/{num_epochs}")
             
             try:
-                # 롤아웃 수집
-                experiences = self.collect_rollouts(training_prompts)
+                # 롤아웃 수집 (이미지 저장 포함)
+                experiences = self.collect_rollouts_with_logging(training_prompts, epoch + 1)
                 
                 if not experiences:
                     logger.warning(f"⚠️ 에포크 {epoch + 1}: 경험 없음, 건너뛰기")
@@ -449,15 +644,15 @@ class SimpleGRPOTrainer:
                 # 정책 업데이트
                 metrics = self.update_policy(experiences)
                 
-                # 메트릭 로깅
-                avg_reward = sum(exp['reward'] for exp in experiences) / len(experiences)
-                logger.info(f"📊 에포크 {epoch + 1} 결과:")
-                logger.info(f"  - 평균 리워드: {avg_reward:.4f}")
-                logger.info(f"  - 경험 수: {len(experiences)}")
+                # 에포크 시간 기록
+                epoch_time = time.time() - epoch_start_time
+                self.training_metrics['epoch_times'].append(epoch_time)
                 
-                if metrics:
-                    for key, value in metrics.items():
-                        logger.info(f"  - {key}: {value:.4f}")
+                # 상세 메트릭 로깅
+                self.log_epoch_metrics(epoch + 1, experiences, metrics)
+                
+                # 플롯 생성 (매 에포크마다)
+                self.plot_training_metrics(epoch + 1)
                 
                 # GPU 메모리 정리
                 if self.use_gpu:
@@ -465,8 +660,12 @@ class SimpleGRPOTrainer:
                         with torch.cuda.device(gpu_id):
                             torch.cuda.empty_cache()
                 
+                logger.info(f"⏱️ 에포크 {epoch + 1} 완료 시간: {epoch_time:.2f}초")
+                
             except Exception as e:
                 logger.error(f"❌ 에포크 {epoch + 1} 실패: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         logger.info("🎉 Simple GRPO 학습 완료!")
@@ -481,13 +680,13 @@ def main():
     logger.info("  GPU 2: Stable Diffusion 3 Image Generation")
     logger.info("=" * 60)
     
-    # 설정 - LoRA 최적화
+    # 설정 - 고성능 LoRA 최적화
     config = QWENGRPOConfig(
-        learning_rate=1e-4,  # LoRA에 적합한 학습률로 증가
-        batch_size=2,  # 배치 크기 약간 증가
-        num_rollouts=2,  # 롤아웃 수 증가
+        learning_rate=2e-4,  # 더 높은 학습률 (확장된 LoRA에 맞춤)
+        batch_size=3,  # 배치 크기 증가 (메모리 여유분 활용)
+        num_rollouts=3,  # 롤아웃 수 증가
         max_prompt_length=77,
-        max_new_tokens=25,  # 토큰 수 약간 증가
+        max_new_tokens=30,  # 토큰 수 증가
         temperature=1.2,
         top_p=0.9,
         top_k=100,
@@ -495,7 +694,7 @@ def main():
         clip_ratio=0.2,
         entropy_coef=0.01,
         save_images=True,
-        log_dir="simple_grpo_results"
+        log_dir="grpo_enhanced_results"  # 새로운 결과 디렉토리
     )
     
     try:

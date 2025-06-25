@@ -88,20 +88,23 @@ class QWENModel:
             self.model = self.model.to(self.device)
             logger.info(f"✅ 모델을 {self.device}로 이동")
         
-        # LoRA 설정 및 적용 - 균형잡힌 설정
+        # LoRA 설정 및 적용 - 고성능 설정 (메모리 여유분 활용)
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=16,  # LoRA rank 복원 (성능과 메모리 균형)
-            lora_alpha=32,  # LoRA scaling parameter 복원
-            lora_dropout=0.1,
+            r=32,  # LoRA rank 대폭 증가 (16 → 32)
+            lora_alpha=64,  # LoRA scaling parameter 증가 (32 → 64)
+            lora_dropout=0.05,  # 드롭아웃 감소로 더 강한 학습
             target_modules=[
-                # Attention 모듈들
+                # Attention 모듈들 (모든 projection)
                 "q_proj", "v_proj", "k_proj", "o_proj",
-                # MLP 모듈들 (선택적)
-                "gate_proj", "up_proj", "down_proj"
+                # MLP 모듈들 (모든 linear layers)
+                "gate_proj", "up_proj", "down_proj",
+                # Vision 관련 모듈들 추가
+                "visual_proj", "lm_head"
             ],
-            bias="none",
+            bias="lora_only",  # bias도 LoRA로 학습
             inference_mode=False,
+            modules_to_save=["embed_tokens"],  # 임베딩도 학습
         )
         
         # LoRA 어댑터 적용
