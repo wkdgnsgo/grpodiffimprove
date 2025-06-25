@@ -16,6 +16,8 @@ from dataclasses import dataclass
 import math
 import os
 from datetime import datetime
+import matplotlib.pyplot as plt
+import matplotlib.style as mplstyle
 from qwen import QWENModel, QWENGRPOConfig
 
 logger = logging.getLogger(__name__)
@@ -321,6 +323,15 @@ class QWENGRPOTrainer:
         
         self.env = QWENGRPOEnvironment(qwen_model, reward_model, sd_pipeline, config)
         
+        # 리워드 추적을 위한 변수들
+        self.episode_rewards = []
+        self.episode_numbers = []
+        self.running_avg_rewards = []
+        
+        # 플롯 설정
+        mplstyle.use('fast')
+        plt.ion()  # Interactive mode on
+        
         logger.info("🎯 QWEN GRPO 트레이너 초기화 완료")
         logger.info(f"✅ Action Space: {config.num_enhancement_candidates} enhancement candidates")
     
@@ -438,6 +449,11 @@ class QWENGRPOTrainer:
             metrics['epoch'] = epoch + 1
             all_metrics.append(metrics)
             
+            # 에피소드 평균 리워드 계산 및 플롯 업데이트
+            epoch_rewards = [exp['reward'] for exp in experiences]
+            avg_reward = np.mean(epoch_rewards)
+            self._update_reward_plot(epoch + 1, avg_reward)
+            
             # 주기적으로 샘플 출력 확인 (다양한 프롬프트 사용)
             if (epoch + 1) % 3 == 0:
                 logger.info(f"\n📋 에포크 {epoch + 1} 샘플 출력:")
@@ -446,6 +462,8 @@ class QWENGRPOTrainer:
                 sample_prompts = [train_prompts[i] for i in sample_indices]
                 self._log_sample_outputs(sample_prompts)
         
+        # 최종 플롯 저장
+        self._save_reward_plot()
         logger.info("\n✅ QWEN GRPO 학습 완료!")
         return all_metrics
     
@@ -467,6 +485,111 @@ class QWENGRPOTrainer:
                 
             except Exception as e:
                 logger.warning(f"  샘플 출력 실패: {e}")
+    
+    def _update_reward_plot(self, epoch: int, avg_reward: float):
+        """실시간 리워드 플롯 업데이트"""
+        self.episode_numbers.append(epoch)
+        self.episode_rewards.append(avg_reward)
+        
+        # 이동 평균 계산 (윈도우 크기: 5)
+        window_size = min(5, len(self.episode_rewards))
+        if len(self.episode_rewards) >= window_size:
+            running_avg = np.mean(self.episode_rewards[-window_size:])
+            self.running_avg_rewards.append(running_avg)
+        else:
+            self.running_avg_rewards.append(avg_reward)
+        
+        # 플롯 업데이트
+        try:
+            plt.clf()  # Clear figure
+            
+            # 메인 리워드 플롯
+            plt.plot(self.episode_numbers, self.episode_rewards, 'b-', alpha=0.6, label='Episode Reward')
+            plt.plot(self.episode_numbers, self.running_avg_rewards, 'r-', linewidth=2, label='Moving Average (5)')
+            
+            plt.title('QWEN GRPO Training Progress', fontsize=14, fontweight='bold')
+            plt.xlabel('Epoch', fontsize=12)
+            plt.ylabel('Average Reward', fontsize=12)
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # Y축 범위 자동 조정
+            if len(self.episode_rewards) > 1:
+                y_min = min(self.episode_rewards) * 0.95
+                y_max = max(self.episode_rewards) * 1.05
+                plt.ylim(y_min, y_max)
+            
+            # 현재 에포크 정보 표시
+            plt.text(0.02, 0.98, f'Current Epoch: {epoch}\nCurrent Reward: {avg_reward:.4f}\nMoving Avg: {self.running_avg_rewards[-1]:.4f}', 
+                    transform=plt.gca().transAxes, fontsize=10, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            
+            plt.tight_layout()
+            plt.pause(0.01)  # 짧은 pause로 플롯 업데이트
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 플롯 업데이트 실패: {e}")
+    
+    def _save_reward_plot(self):
+        """최종 리워드 플롯 저장"""
+        try:
+            if not self.episode_numbers:
+                logger.warning("⚠️ 저장할 리워드 데이터가 없습니다.")
+                return
+            
+            # 최종 플롯 생성
+            plt.figure(figsize=(12, 8))
+            
+            # 서브플롯 1: 리워드 추이
+            plt.subplot(2, 1, 1)
+            plt.plot(self.episode_numbers, self.episode_rewards, 'b-', alpha=0.6, marker='o', markersize=4, label='Episode Reward')
+            plt.plot(self.episode_numbers, self.running_avg_rewards, 'r-', linewidth=3, label='Moving Average (5)')
+            plt.title('QWEN GRPO Training Progress - Reward Trend', fontsize=14, fontweight='bold')
+            plt.xlabel('Epoch')
+            plt.ylabel('Average Reward')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # 서브플롯 2: 리워드 분포 히스토그램
+            plt.subplot(2, 1, 2)
+            plt.hist(self.episode_rewards, bins=min(20, len(self.episode_rewards)), alpha=0.7, color='skyblue', edgecolor='black')
+            plt.title('Reward Distribution', fontsize=14, fontweight='bold')
+            plt.xlabel('Reward Value')
+            plt.ylabel('Frequency')
+            plt.grid(True, alpha=0.3)
+            
+            # 통계 정보 추가
+            mean_reward = np.mean(self.episode_rewards)
+            std_reward = np.std(self.episode_rewards)
+            max_reward = np.max(self.episode_rewards)
+            min_reward = np.min(self.episode_rewards)
+            
+            stats_text = f'Statistics:\nMean: {mean_reward:.4f}\nStd: {std_reward:.4f}\nMax: {max_reward:.4f}\nMin: {min_reward:.4f}'
+            plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes, fontsize=10, 
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+            
+            plt.tight_layout()
+            
+            # 저장
+            if self.config.save_images:
+                plot_path = os.path.join(self.config.log_dir, 'training_progress.png')
+                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                logger.info(f"📊 학습 진행 플롯 저장: {plot_path}")
+                
+                # 데이터도 CSV로 저장
+                import csv
+                csv_path = os.path.join(self.config.log_dir, 'training_rewards.csv')
+                with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['Epoch', 'Average_Reward', 'Moving_Average'])
+                    for i in range(len(self.episode_numbers)):
+                        writer.writerow([self.episode_numbers[i], self.episode_rewards[i], self.running_avg_rewards[i]])
+                logger.info(f"📊 학습 데이터 저장: {csv_path}")
+            
+            plt.show()
+            
+        except Exception as e:
+            logger.error(f"❌ 최종 플롯 저장 실패: {e}")
 
 # ... existing code ...
 
