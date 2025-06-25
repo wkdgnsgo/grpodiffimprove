@@ -68,21 +68,25 @@ class QWENModel:
                 # device_map을 제거하여 Accelerate가 분산 관리하도록 함
             }
         else:
-            # 기본 GPU 사용 시
+            # 기본 GPU 사용 시 (단일 GPU 모드)
             model_kwargs = {
                 'torch_dtype': torch.float16,
                 'trust_remote_code': True,
                 'low_cpu_mem_usage': True,
-                'device_map': 'auto',  # 자동 GPU 분산
-                'max_memory': {0: "18GB", 1: "8GB", 2: "8GB"}  # GPU별 메모리 제한
+                # device_map 제거하여 단일 GPU 사용
             }
 
-        logger.info("🔧 QWEN 7B 모델 로딩 중... (LoRA + Accelerate 모드)")
+        logger.info("🔧 QWEN 7B 모델 로딩 중... (단일 GPU 모드)")
         
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.model_name,
                 **model_kwargs
         )
+        
+        # 모델을 지정된 GPU로 이동 (Accelerate 모드가 아닐 때만)
+        if self.device != "accelerate":
+            self.model = self.model.to(self.device)
+            logger.info(f"✅ 모델을 {self.device}로 이동")
         
         # LoRA 설정 및 적용
         lora_config = LoraConfig(
