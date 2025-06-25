@@ -316,33 +316,55 @@ class SimpleGRPOTrainer:
         try:
             detailed_rewards = []
             for i, (enhanced_prompt, image) in enumerate(zip(enhanced_prompts, images)):
-                # 기본 CLIP 리워드
-                clip_score = self.reward_model.calculate_reward(user_prompt, enhanced_prompt, image)
+                # CLIPReward.calculate_reward()를 사용하여 전체 리워드 계산
+                total_reward = self.reward_model.calculate_reward(user_prompt, enhanced_prompt, image)
                 
-                # Aesthetic score (이미지 품질)
-                aesthetic_score = self.calculate_aesthetic_score(image)
+                # 개별 구성 요소 계산 (분석용)
+                # 1. CLIP 유사도 직접 계산
+                inputs = self.reward_model.processor(
+                    text=[user_prompt], 
+                    images=[image], 
+                    return_tensors="pt", 
+                    padding=True
+                ).to(self.reward_model.device)
                 
-                # Semantic similarity (프롬프트와 이미지의 의미적 유사성)
-                semantic_similarity = self.calculate_semantic_similarity(user_prompt, enhanced_prompt, image)
+                with torch.no_grad():
+                    outputs = self.reward_model.model(**inputs)
+                    image_embeds = outputs.image_embeds
+                    text_embeds = outputs.text_embeds
+                    image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
+                    text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
+                    clip_similarity = torch.sum(text_embeds * image_embeds, dim=-1).item()
                 
-                # 패널티 계산
-                clip_penalty = max(0, 0.7 - clip_score) * 0.5  # CLIP 점수가 낮으면 패널티
-                semantic_penalty = max(0, 0.6 - semantic_similarity) * 0.3  # 의미적 유사성이 낮으면 패널티
+                # 2. Aesthetic score 직접 계산
+                pixel_values = (
+                    self.reward_model.aesthetic_predictor_preprocessor(images=image, return_tensors="pt")
+                    .pixel_values.to(torch.float16).to(self.reward_model.device)
+                )
+                with torch.inference_mode():
+                    aesthetic_score = self.reward_model.aesthetic_predictor_model(pixel_values).logits.squeeze().item()
                 
-                # 총 리워드 계산
-                total_reward = (clip_score * 0.5 + 
-                               aesthetic_score * 0.3 + 
-                               semantic_similarity * 0.2 - 
-                               clip_penalty - 
-                               semantic_penalty)
+                # 3. Semantic similarity 직접 계산
+                original_embed = self.reward_model.sentence_transformer_model.encode(user_prompt, convert_to_tensor=True)
+                enhanced_embed = self.reward_model.sentence_transformer_model.encode(enhanced_prompt, convert_to_tensor=True)
+                from sentence_transformers import util
+                semantic_similarity = util.cos_sim(original_embed, enhanced_embed).item()
+                
+                # 4. 패널티 계산 (CLIPReward와 동일한 방식)
+                clip_pen_threshold = 0.28
+                aesthetic_weight_factor = 20.0
+                semantic_sim_threshold = 0.7
+                
+                clip_penalty = aesthetic_weight_factor * min(clip_similarity - clip_pen_threshold, 0)
+                semantic_penalty = -10 * (semantic_sim_threshold - semantic_similarity) if semantic_similarity < semantic_sim_threshold else 0.0
                 
                 detailed_reward = {
-                    'total_reward': max(0.0, total_reward),  # 음수 방지
-                    'clip_score': clip_score,
-                    'aesthetic_score': aesthetic_score,
-                    'semantic_similarity': semantic_similarity,
-                    'clip_penalty': clip_penalty,
-                    'semantic_penalty': semantic_penalty
+                    'total_reward': total_reward,  # CLIPReward에서 계산된 값 그대로 사용
+                    'clip_score': clip_similarity,  # CLIP 유사도 (0~1)
+                    'aesthetic_score': aesthetic_score,  # 미적 점수
+                    'semantic_similarity': semantic_similarity,  # 의미적 유사도 (0~1)
+                    'clip_penalty': clip_penalty,  # CLIP 패널티 (음수 또는 0)
+                    'semantic_penalty': semantic_penalty  # 의미적 패널티 (음수 또는 0)
                 }
                 detailed_rewards.append(detailed_reward)
             
