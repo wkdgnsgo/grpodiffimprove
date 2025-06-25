@@ -67,13 +67,12 @@ class QWENModel:
                 # device_map을 제거하여 Accelerate가 분산 관리하도록 함
             }
         else:
-            # 기본 GPU 사용 시 (단일 GPU 모드) - 메모리 극한 최적화
+            # 기본 GPU 사용 시 (단일 GPU 모드) - 메모리 최적화
             model_kwargs = {
                 'torch_dtype': torch.float16,
                 'trust_remote_code': True,
                 'low_cpu_mem_usage': True,
                 'use_cache': False,  # 캐시 비활성화로 메모리 절약
-                'attn_implementation': 'flash_attention_2',  # Flash Attention 사용
                 # device_map 제거하여 단일 GPU 사용
             }
 
