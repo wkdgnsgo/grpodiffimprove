@@ -15,10 +15,6 @@ from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 from dataclasses import dataclass
 import math
-import re
-import json
-import os
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -37,298 +33,10 @@ class PureGRPOConfig:
     clip_ratio: float = 0.1
     entropy_coef: float = 0.02
     vocab_size: int = 32000
-    enable_step_logging: bool = True  # 상세 스텝 로깅 활성화
-    log_dir: str = "training_logs"    # 로그 저장 디렉토리
 
-class StepLogger:
-    """각 스텝의 상세 정보를 기록하는 로거"""
-    
-    def __init__(self, log_dir: str):
-        self.log_dir = log_dir
-        os.makedirs(log_dir, exist_ok=True)
-        self.step_data = []
-        self.episode_counter = 0
-        
-        # 이미지 저장 디렉토리
-        self.image_dir = os.path.join(log_dir, "images")
-        os.makedirs(self.image_dir, exist_ok=True)
-        
-        # 에피소드별 디렉토리
-        self.episodes_dir = os.path.join(log_dir, "episodes")
-        os.makedirs(self.episodes_dir, exist_ok=True)
-        
-        # 요약 통계 저장
-        self.summary_stats = {
-            'total_episodes': 0,
-            'total_steps': 0,
-            'average_reward': 0.0,
-            'best_reward': 0.0,
-            'worst_reward': 0.0,
-            'reward_history': []
-        }
-    
-    def log_step(self, step_info: Dict):
-        """스텝 정보 로깅"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        step_info['timestamp'] = timestamp
-        self.step_data.append(step_info)
-        
-        # 콘솔 출력
-        self._print_step_summary(step_info)
-        
-        # JSON 파일로 저장
-        self._save_to_json()
-    
-    def _print_step_summary(self, step_info: Dict):
-        """스텝 요약 정보 출력"""
-        print("\n" + "="*80)
-        print(f"📊 STEP {step_info.get('step', 'N/A')} - {step_info.get('timestamp', '')}")
-        print("="*80)
-        
-        print(f"🔤 Original Prompt: '{step_info.get('original_prompt', 'N/A')}'")
-        print(f"✨ Enhanced Prompt: '{step_info.get('enhanced_prompt', 'N/A')}'")
-        
-        if 'reward_components' in step_info:
-            rewards = step_info['reward_components']
-            print(f"🎯 Rewards:")
-            print(f"   - Original→Image: {rewards.get('original_reward', 0):.3f}")
-            print(f"   - Enhanced→Image: {rewards.get('enhanced_reward', 0):.3f}")
-            print(f"   - Final Reward: {rewards.get('final_reward', 0):.3f}")
-        
-        if 'action_info' in step_info:
-            action = step_info['action_info']
-            print(f"🎬 Action: Token {action.get('token_id', 'N/A')} → '{action.get('token_text', 'N/A')}'")
-            print(f"   - Log Prob: {action.get('log_prob', 0):.4f}")
-        
-        if 'images_saved' in step_info:
-            print(f"🖼️  Images saved: {step_info['images_saved']}")
-        
-        print("="*80)
-    
-    def _save_to_json(self):
-        """JSON 파일로 저장"""
-        json_path = os.path.join(self.log_dir, "step_logs.json")
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(self.step_data, f, indent=2, ensure_ascii=False)
-    
-    def save_image(self, image, filename: str) -> str:
-        """이미지 저장"""
-        image_path = os.path.join(self.image_dir, filename)
-        image.save(image_path)
-        return image_path
-    
-    def start_new_episode(self, episode_id: str, original_prompt: str):
-        """새 에피소드 시작"""
-        self.episode_counter += 1
-        episode_dir = os.path.join(self.episodes_dir, f"episode_{self.episode_counter:03d}_{episode_id}")
-        os.makedirs(episode_dir, exist_ok=True)
-        
-        # 에피소드 메타데이터 저장
-        episode_meta = {
-            'episode_id': episode_id,
-            'episode_number': self.episode_counter,
-            'original_prompt': original_prompt,
-            'start_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'steps': []
-        }
-        
-        meta_path = os.path.join(episode_dir, "episode_meta.json")
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump(episode_meta, f, indent=2, ensure_ascii=False)
-        
-        return episode_dir
-    
-    def log_episode_step(self, episode_dir: str, step_data: Dict):
-        """에피소드 내 스텝 로깅"""
-        # 에피소드 메타데이터 업데이트
-        meta_path = os.path.join(episode_dir, "episode_meta.json")
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            episode_meta = json.load(f)
-        
-        episode_meta['steps'].append(step_data)
-        
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump(episode_meta, f, indent=2, ensure_ascii=False)
-    
-    def finish_episode(self, episode_dir: str, final_reward: float, total_steps: int):
-        """에피소드 완료 처리"""
-        # 에피소드 메타데이터 업데이트
-        meta_path = os.path.join(episode_dir, "episode_meta.json")
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            episode_meta = json.load(f)
-        
-        episode_meta.update({
-            'end_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'final_reward': final_reward,
-            'total_steps': total_steps,
-            'completed': True
-        })
-        
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump(episode_meta, f, indent=2, ensure_ascii=False)
-        
-        # 통계 업데이트
-        self.summary_stats['total_episodes'] += 1
-        self.summary_stats['total_steps'] += total_steps
-        self.summary_stats['reward_history'].append(final_reward)
-        
-        if len(self.summary_stats['reward_history']) == 1:
-            self.summary_stats['best_reward'] = final_reward
-            self.summary_stats['worst_reward'] = final_reward
-        else:
-            self.summary_stats['best_reward'] = max(self.summary_stats['best_reward'], final_reward)
-            self.summary_stats['worst_reward'] = min(self.summary_stats['worst_reward'], final_reward)
-        
-        self.summary_stats['average_reward'] = np.mean(self.summary_stats['reward_history'])
-        
-        # 요약 통계 저장
-        stats_path = os.path.join(self.log_dir, "summary_stats.json")
-        with open(stats_path, 'w', encoding='utf-8') as f:
-            json.dump(self.summary_stats, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"✅ 에피소드 완료: 리워드={final_reward:.3f}, 스텝={total_steps}")
-    
-    def create_comparison_html(self):
-        """이미지 비교를 위한 HTML 보고서 생성"""
-        html_content = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>GRPO 훈련 결과 비교</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        .episode { border: 1px solid #ddd; margin: 20px 0; padding: 20px; }
-        .step { border-left: 3px solid #007bff; margin: 10px 0; padding: 10px; }
-        .image-comparison { display: flex; gap: 20px; margin: 10px 0; }
-        .image-container { text-align: center; }
-        .image-container img { max-width: 300px; height: auto; border: 1px solid #ddd; }
-        .reward-info { background: #f8f9fa; padding: 10px; margin: 10px 0; }
-        .prompt-info { background: #e9ecef; padding: 10px; margin: 10px 0; }
-    </style>
-</head>
-<body>
-    <h1>🎯 GRPO 훈련 결과 비교</h1>
-    <div class="summary">
-        <h2>📊 요약 통계</h2>
-        <p>총 에피소드: {total_episodes}</p>
-        <p>총 스텝: {total_steps}</p>
-        <p>평균 리워드: {average_reward:.3f}</p>
-        <p>최고 리워드: {best_reward:.3f}</p>
-        <p>최저 리워드: {worst_reward:.3f}</p>
-    </div>
-""".format(**self.summary_stats)
-        
-        # 각 에피소드 정보 추가
-        for episode_dir in sorted(os.listdir(self.episodes_dir)):
-            episode_path = os.path.join(self.episodes_dir, episode_dir)
-            meta_path = os.path.join(episode_path, "episode_meta.json")
-            
-            if os.path.exists(meta_path):
-                with open(meta_path, 'r', encoding='utf-8') as f:
-                    episode_meta = json.load(f)
-                
-                html_content += f"""
-    <div class="episode">
-        <h3>에피소드 {episode_meta['episode_number']}: {episode_meta['original_prompt']}</h3>
-        <p>최종 리워드: {episode_meta.get('final_reward', 0):.3f}</p>
-        <p>총 스텝: {episode_meta.get('total_steps', 0)}</p>
-"""
-                
-                # 각 스텝의 이미지 비교
-                for step in episode_meta.get('steps', []):
-                    if 'images_saved' in step:
-                        html_content += f"""
-        <div class="step">
-            <h4>스텝 {step['step']}</h4>
-            <div class="prompt-info">
-                <p><strong>원본 프롬프트:</strong> {step['original_prompt']}</p>
-                <p><strong>향상된 프롬프트:</strong> {step['enhanced_prompt']}</p>
-            </div>
-            <div class="reward-info">
-                <p><strong>리워드:</strong> 원본→이미지 {step['reward_components']['original_reward']:.3f}, 
-                   향상→이미지 {step['reward_components']['enhanced_reward']:.3f}</p>
-            </div>
-            <div class="image-comparison">
-                <div class="image-container">
-                    <img src="{step['images_saved']['original']}" alt="원본 이미지">
-                    <p>원본 프롬프트 이미지</p>
-                </div>
-                <div class="image-container">
-                    <img src="{step['images_saved']['enhanced']}" alt="향상된 이미지">
-                    <p>향상된 프롬프트 이미지</p>
-                </div>
-            </div>
-        </div>
-"""
-                
-                html_content += "    </div>\n"
-        
-        html_content += """
-</body>
-</html>
-"""
-        
-        # HTML 파일 저장
-        html_path = os.path.join(self.log_dir, "comparison_report.html")
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        
-        logger.info(f"📄 HTML 비교 보고서 생성됨: {html_path}")
-        return html_path
 
-class EnglishTokenFilter:
-    """영어 토큰만 허용하는 필터"""
-    
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-        self.english_token_ids = self._build_english_vocab()
-        logger.info(f"영어 토큰 필터 초기화: {len(self.english_token_ids)}/{len(tokenizer.get_vocab())} 토큰")
-    
-    def _build_english_vocab(self) -> set:
-        """영어 토큰 ID 집합 구성"""
-        vocab = self.tokenizer.get_vocab()
-        english_tokens = set()
-        
-        # 영어 패턴 정의
-        english_pattern = re.compile(r'^[a-zA-Z0-9\s\.,!?;:\-_\'\"()\[\]{}@#$%^&*+=<>/\\|`~]*$')
-        
-        for token, token_id in vocab.items():
-            # 토큰 디코딩
-            try:
-                decoded = self.tokenizer.decode([token_id], skip_special_tokens=False)
-                # 영어 패턴 매칭
-                if english_pattern.match(decoded.strip()):
-                    english_tokens.add(token_id)
-            except:
-                continue
-        
-        # 특수 토큰들 추가 (EOS, BOS, PAD 등)
-        special_tokens = [
-            self.tokenizer.eos_token_id,
-            self.tokenizer.bos_token_id if hasattr(self.tokenizer, 'bos_token_id') else None,
-            self.tokenizer.pad_token_id if hasattr(self.tokenizer, 'pad_token_id') else None,
-            self.tokenizer.unk_token_id if hasattr(self.tokenizer, 'unk_token_id') else None,
-        ]
-        
-        for token_id in special_tokens:
-            if token_id is not None:
-                english_tokens.add(token_id)
-        
-        return english_tokens
-    
-    def filter_logits(self, logits: torch.Tensor) -> torch.Tensor:
-        """영어가 아닌 토큰의 로짓을 -inf로 설정"""
-        filtered_logits = logits.clone()
-        
-        # 모든 토큰을 -inf로 설정
-        filtered_logits.fill_(float('-inf'))
-        
-        # 영어 토큰만 원래 값으로 복원
-        for token_id in self.english_token_ids:
-            if token_id < logits.size(-1):
-                filtered_logits[..., token_id] = logits[..., token_id]
-        
-        return filtered_logits
+
+
 
 class PureGRPOPolicy(nn.Module):
     """순수 GRPO 정책 네트워크 (Value Head 없음)"""
@@ -337,9 +45,6 @@ class PureGRPOPolicy(nn.Module):
         super().__init__()
         self.qwen_model = qwen_model
         self.config = config
-        
-        # 영어 토큰 필터 초기화
-        self.english_filter = EnglishTokenFilter(qwen_model.tokenizer)
         
         # GPU 디바이스 설정
         self.qwen_device = "cuda:0"  # QWEN은 GPU 0
@@ -350,7 +55,6 @@ class PureGRPOPolicy(nn.Module):
         
         logger.info(f"순수 GRPO 정책 - Hidden: {self.hidden_size}, Vocab: {self.vocab_size}")
         logger.info(f"GPU 배치: QWEN={self.qwen_device}, Policy={self.policy_device}")
-        logger.info(f"영어 토큰 필터링 활성화: {len(self.english_filter.english_token_ids)} 토큰")
         
         # 오직 정책 헤드만! (Value Head 없음) - GPU 0에 배치 (float16으로 통일)
         self.policy_head = nn.Sequential(
@@ -419,16 +123,13 @@ class PureGRPOPolicy(nn.Module):
         return policy_logits  # Values 없음!
     
     def get_action_and_log_prob(self, state: Dict):
-        """액션 선택과 로그 확률 (Value 없음) - 영어 토큰 필터링 적용"""
+        """액션 선택과 로그 확률 (Value 없음)"""
         input_ids = state['input_ids'].unsqueeze(0)
         attention_mask = state['attention_mask'].unsqueeze(0)
         
         policy_logits = self(input_ids, attention_mask)
         
-        # 영어 토큰 필터링 적용
-        filtered_logits = self.english_filter.filter_logits(policy_logits)
-        
-        scaled_logits = filtered_logits / self.config.temperature
+        scaled_logits = policy_logits / self.config.temperature
         scaled_logits = torch.clamp(scaled_logits, min=-10, max=10)
         
         # Top-k 필터링
@@ -454,11 +155,14 @@ class PureGRPOPolicy(nn.Module):
             prob_sum = token_probs.sum(dim=-1, keepdim=True)
             token_probs = token_probs / (prob_sum + 1e-8)
         
-    
-        token_dist = torch.distributions.Categorical(token_probs)
-        action = token_dist.sample()
-        action_log_prob = token_dist.log_prob(action).half()  # float16으로 변환
-    
+        try:
+            token_dist = torch.distributions.Categorical(token_probs)
+            action = token_dist.sample()
+            action_log_prob = token_dist.log_prob(action).half()  # float16으로 변환
+        except ValueError:
+            logger.warning("Invalid probability distribution, using uniform sampling")
+            action = torch.randint(0, self.vocab_size, (1,))
+            action_log_prob = torch.log(torch.tensor(1.0 / self.vocab_size, device=self.qwen_device)).half()
         
         # Value 없음! 오직 action, log_prob, logits만 반환 (모두 float16)
         return action.item(), action_log_prob, scaled_logits.squeeze(0).half()
@@ -474,12 +178,6 @@ class PureGRPOPromptEnvironment:
         self.tokenizer = qwen_model.tokenizer
         self.vocab_size = len(self.tokenizer.get_vocab())
         
-        # 스텝 로거 초기화
-        if config.enable_step_logging:
-            self.step_logger = StepLogger(config.log_dir)
-        else:
-            self.step_logger = None
-        
         # GPU 디바이스 설정
         self.qwen_device = "cuda:0"  # QWEN (토큰화)
         self.sd_device = "cuda:1"    # Stable Diffusion (이미지 생성)
@@ -488,24 +186,15 @@ class PureGRPOPromptEnvironment:
         self.current_prompt = ""
         self.original_prompt = ""
         self.step_count = 0
-        self.current_episode_dir = None
         
         logger.info(f"순수 GRPO 환경 초기화 - Vocab: {self.vocab_size}")
         logger.info(f"GPU 배치: QWEN={self.qwen_device}, SD={self.sd_device}, Reward={self.reward_device}")
-        if self.step_logger:
-            logger.info(f"상세 스텝 로깅 활성화: {config.log_dir}")
     
     def reset(self, user_prompt: str):
-        """환경 리셋 - GPU 0으로 토큰 이동 + 새 에피소드 시작"""
+        """환경 리셋 - GPU 0으로 토큰 이동"""
         self.original_prompt = user_prompt
         self.current_prompt = user_prompt
         self.step_count = 0
-        
-        # 새 에피소드 시작
-        if self.step_logger:
-            episode_id = user_prompt.replace(' ', '_')[:20]  # 간단한 ID 생성
-            self.current_episode_dir = self.step_logger.start_new_episode(episode_id, user_prompt)
-            logger.info(f"🎬 새 에피소드 시작: {episode_id}")
         
         # 현재 프롬프트를 토큰화하고 QWEN GPU(0번)로 이동
         tokens = self.tokenizer.encode(
@@ -526,7 +215,7 @@ class PureGRPOPromptEnvironment:
         }
     
     def step(self, action: int):
-        """환경 스텝 - GPU 간 데이터 이동 처리 + 상세 로깅"""
+        """환경 스텝 - GPU 간 데이터 이동 처리"""
         # 액션(토큰)을 텍스트로 변환
         try:
             token_text = self.tokenizer.decode([action], skip_special_tokens=True)
@@ -552,111 +241,36 @@ class PureGRPOPromptEnvironment:
                     
                     # SD3 파이프라인을 GPU 1로 이동하여 이미지 생성
                     with torch.cuda.device(1):
-                        # 원본 프롬프트로 이미지 생성 (비교용)
-                        original_result = self.sd_pipeline(
-                            prompt=self.original_prompt,
-                            num_inference_steps=20,
-                            guidance_scale=7.0,
-                            height=1024,
-                            width=1024
-                        )
-                        original_image = original_result.images[0]
-                        
-                        # 향상된 프롬프트로 이미지 생성
-                        enhanced_result = self.sd_pipeline(
+                        result = self.sd_pipeline(
                             prompt=self.current_prompt,
-                            num_inference_steps=20,
+                            num_inference_steps=28,
                             guidance_scale=7.0,
                             height=1024,
                             width=1024
                         )
-                        enhanced_image = enhanced_result.images[0]
+                        image = result.images[0]
                     
                     logger.info(f"🎯 리워드 계산 시작 (GPU {self.reward_device})")
                     
                     # CLIP 리워드를 GPU 2에서 계산
                     with torch.cuda.device(2):
-                        # 원본 프롬프트 vs 원본 이미지
-                        original_reward = self.reward_model.calculate_reward(
-                            self.original_prompt,
-                            self.original_prompt,
-                            original_image
-                        )
-                        
-                        # 원본 프롬프트 vs 향상된 이미지 (실제 리워드)
-                        enhanced_reward = self.reward_model.calculate_reward(
+                        reward = self.reward_model.calculate_reward(
                             self.original_prompt,
                             self.current_prompt,
-                            enhanced_image
+                            image
                         )
                     
                     # 길이 보너스
                     length_bonus = min(self.step_count / self.config.max_new_tokens, 1.0) * 0.1
-                    total_reward = enhanced_reward + length_bonus
+                    total_reward = reward + length_bonus
                     
                     logger.info(f"✅ 리워드 계산 완료: {total_reward:.4f}")
-                    
-                    # 상세 로깅
-                    if self.step_logger:
-                        # 이미지 저장
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        original_img_path = self.step_logger.save_image(
-                            original_image, 
-                            f"step_{self.step_count:03d}_{timestamp}_original.png"
-                        )
-                        enhanced_img_path = self.step_logger.save_image(
-                            enhanced_image, 
-                            f"step_{self.step_count:03d}_{timestamp}_enhanced.png"
-                        )
-                        
-                        # 스텝 정보 로깅
-                        step_info = {
-                            'step': self.step_count,
-                            'original_prompt': self.original_prompt,
-                            'enhanced_prompt': self.current_prompt,
-                            'action_info': {
-                                'token_id': action,
-                                'token_text': token_text,
-                                'log_prob': 0.0  # 나중에 업데이트됨
-                            },
-                            'reward_components': {
-                                'original_reward': float(original_reward),
-                                'enhanced_reward': float(enhanced_reward),
-                                'length_bonus': float(length_bonus),
-                                'final_reward': float(total_reward)
-                            },
-                            'images_saved': {
-                                'original': original_img_path,
-                                'enhanced': enhanced_img_path
-                            }
-                        }
-                        
-                        # 전역 스텝 로깅
-                        self.step_logger.log_step(step_info)
-                        
-                        # 에피소드별 스텝 로깅
-                        if self.current_episode_dir:
-                            self.step_logger.log_episode_step(self.current_episode_dir, step_info)
-                        
-                        # 에피소드 완료 처리
-                        if done and self.current_episode_dir:
-                            self.step_logger.finish_episode(
-                                self.current_episode_dir, 
-                                float(total_reward), 
-                                self.step_count
-                            )
-                            # HTML 보고서 생성
-                            self.step_logger.create_comparison_html()
                     
                 except Exception as e:
                     logger.warning(f"Reward calculation failed: {e}")
                     total_reward = 0.0
-                    original_image = None
-                    enhanced_image = None
             else:
                 total_reward = 0.0
-                original_image = None
-                enhanced_image = None
             
             # 다음 상태 (GPU 0으로 이동)
             if not done:
@@ -683,9 +297,7 @@ class PureGRPOPromptEnvironment:
             info = {
                 'current_prompt': self.current_prompt,
                 'step_count': self.step_count,
-                'token_added': token_text,
-                'original_image': original_image,
-                'enhanced_image': enhanced_image
+                'token_added': token_text
             }
             
             return next_state, total_reward, done, info
@@ -752,14 +364,6 @@ class PureGRPOTrainer:
                         ref_log_prob = F.log_softmax(ref_logits, dim=-1)[0, action]
                     
                     next_state, reward, done, info = self.env.step(action)
-                    
-                    # 스텝 로거에 log_prob 업데이트 (에피소드 끝에서)
-                    if done and self.env.step_logger and len(self.env.step_logger.step_data) > 0:
-                        last_step_info = self.env.step_logger.step_data[-1]
-                        if 'action_info' in last_step_info:
-                            last_step_info['action_info']['log_prob'] = float(log_prob)
-                            # JSON 파일 다시 저장
-                            self.env.step_logger._save_to_json()
                     
                     # Value 없는 경험 저장!
                     experience = {
@@ -846,7 +450,6 @@ class PureGRPOTrainer:
             old_log_probs.append(exp['log_prob'])
             ref_log_probs.append(exp['ref_log_prob'])
             advantages.append(exp['advantage'])
-            # ❌ values.append(exp['value'])  # Value 없음!
         
         if len(batch_states) == 0:
             return {}
@@ -970,58 +573,4 @@ class PureGRPOTrainer:
             logger.info(f"  Original: {original_prompt}")
             logger.info(f"  Enhanced: {enhanced_prompt}")
 
-def main():
-    """테스트 실행"""
-    logging.basicConfig(level=logging.INFO)
-    
-    class MockQwenModel:
-        def __init__(self):
-            from transformers import AutoTokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-            
-            class MockModel:
-                def __init__(self):
-                    class Config:
-                        hidden_size = 4096
-                    self.config = Config()
-                
-                def __call__(self, **kwargs):
-                    batch_size, seq_len = kwargs['input_ids'].shape
-                    class Output:
-                        last_hidden_state = torch.randn(batch_size, seq_len, 4096)
-                    return Output()
-            
-            self.model = MockModel()
-    
-    class MockReward:
-        def calculate_reward(self, original, enhanced, image):
-            return np.random.uniform(5.0, 9.0)
-    
-    class MockSD:
-        def __call__(self, **kwargs):
-            from PIL import Image
-            class Result:
-                images = [Image.new('RGB', (1024, 1024), color='red')]
-            return Result()
-    
-    config = PureGRPOConfig(
-        learning_rate=1e-6,
-        batch_size=2,
-        num_rollouts=3,
-        max_new_tokens=10,
-        top_k=50
-    )
-    
-    qwen = MockQwenModel()
-    reward = MockReward()
-    sd = MockSD()
-    
-    trainer = PureGRPOTrainer(qwen, reward, sd, config)
-    
-    test_prompts = ["a cat sitting", "beautiful sunset"]
-    trainer.train(test_prompts, num_epochs=2)
-
-if __name__ == "__main__":
-    main() 
+ 

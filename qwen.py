@@ -59,6 +59,9 @@ class QWENModel:
 
         Guidelines:
         - Keep the original concept unchanged
+        - Only using English words and sentences
+        - Do not use any other languages
+        - Do not use any special characters
         - Add artistic style, mood, and atmosphere
         - Include technical specifications (lighting, composition, resolution)
         - Add creative details that make the image more realistic
