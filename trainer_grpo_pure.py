@@ -93,7 +93,15 @@ class PureGRPOPolicy(nn.Module):
                 attention_mask=attention_mask,
                 output_hidden_states=True
             )
-            hidden_states = outputs.last_hidden_state
+            # QWEN2VL 모델은 last_hidden_state 대신 hidden_states를 사용
+            if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
+                hidden_states = outputs.last_hidden_state
+            elif hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
+                # hidden_states는 튜플이므로 마지막 레이어 선택
+                hidden_states = outputs.hidden_states[-1]
+            else:
+                # 대안: logits에서 히든 스테이트 추출 시도
+                raise AttributeError("Cannot find hidden states in model output")
         
         if attention_mask is not None:
             last_valid_indices = attention_mask.sum(dim=1) - 1
