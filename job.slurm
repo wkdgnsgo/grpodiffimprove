@@ -16,7 +16,7 @@
 # Accelerate 멀티 GPU 환경 변수 설정
 export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 export WORLD_SIZE=$(($SLURM_NNODES * SLURM_NTASKS_PER_NODE))
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4
+export CUDA_VISIBLE_DEVICES=2,3,4,5,6,7
 export TOKENIZERS_PARALLELISM=false
 export WANDB_DISABLED=true # WandB 비활성화 (선택사항)
 

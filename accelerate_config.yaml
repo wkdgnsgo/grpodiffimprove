@@ -1,0 +1,54 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+downcast_bf16: "no"
+gpu_ids: "0,1,2,3"
+machine_rank: 0
+main_training_function: main
+mixed_precision: fp16
+num_machines: 1
+num_processes: 4
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+
+# 메모리 최적화 설정
+gradient_accumulation_steps: 2
+dataloader_config:
+  split_batches: true
+
+# DeepSpeed ZeRO 스테이지 2 활성화 (메모리 절약)
+deepspeed_config:
+  gradient_accumulation_steps: 2
+  train_batch_size: 8
+  train_micro_batch_size_per_gpu: 1
+
+  zero_optimization:
+    stage: 2
+    allgather_partitions: true
+    allgather_bucket_size: 2e8
+    overlap_comm: true
+    reduce_scatter: true
+    reduce_bucket_size: 2e8
+    contiguous_gradients: true
+    cpu_offload: false
+
+  fp16:
+    enabled: true
+    initial_scale_power: 16
+
+  optimizer:
+    type: AdamW
+    params:
+      lr: 1e-6
+      weight_decay: 0.01
+
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: false
+    number_checkpoints: null
+    synchronize_checkpoint_boundary: false
+    profile: false

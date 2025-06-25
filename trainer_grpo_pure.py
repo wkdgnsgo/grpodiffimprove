@@ -90,11 +90,11 @@ class QWENGRPOEnvironment:
             
             logger.info(f"✅ 사용된 프롬프트: '{enhanced_prompt[:50]}...'")
             
-            # 이미지 생성 시도 (GPU 4번)
+            # 이미지 생성 시도 (GPU 5번)
             try:
-                logger.info(f"🖼️  이미지 생성 시작 (GPU 4번 - 통합)")
+                logger.info(f"🖼️  이미지 생성 시작 (GPU 5번 - SD3 전용)")
                 
-                with torch.cuda.device(4):
+                with torch.cuda.device(5):
                     # 원본 프롬프트로 이미지 생성
                     original_result = self.sd_pipeline(
                         prompt=self.current_user_prompt,
@@ -126,7 +126,7 @@ class QWENGRPOEnvironment:
             
             # 리워드 계산 시도 (GPU 4번)
             try:
-                logger.info(f"🎯 리워드 계산 시작 (GPU 4번 - 통합)")
+                logger.info(f"🎯 리워드 계산 시작 (GPU 4번 - CLIP 전용)")
                 
                 # CLIP 리워드를 GPU 4에서 계산
                 with torch.cuda.device(4):

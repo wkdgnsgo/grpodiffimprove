@@ -27,8 +27,8 @@ from qwen import QWENModel, QWENGRPOConfig
 from clip_reward import CLIPReward
 from trainer_grpo_pure import QWENGRPOTrainer
 
-def load_stable_diffusion_pipeline(device="cuda:4"):
-    """Stable Diffusion 3 파이프라인 로드 (GPU 4번 - 다른 모델들과 함께)"""
+def load_stable_diffusion_pipeline(device="cuda:5"):
+    """Stable Diffusion 3 파이프라인 로드 (GPU 5번 전용)"""
     try:
         from diffusers import StableDiffusion3Pipeline
         import torch
@@ -108,17 +108,18 @@ def main():
         
         logger.info("\n🎯 GPU 배치 계획 (Accelerate 멀티 GPU):")
         logger.info("  GPU 0-3: QWEN RL 학습 (Accelerate 분산 학습)")
-        logger.info("  GPU 4: SD3 + CLIP + QWEN Reference (통합)")
+        logger.info("  GPU 4: CLIP + QWEN Reference (통합)")
+        logger.info("  GPU 5: Stable Diffusion 3 (이미지 생성 전용)")
     else:
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
-    # QWEN GRPO 설정 (Accelerate 멀티 GPU)
+    # QWEN GRPO 설정 (Accelerate 멀티 GPU) - 메모리 최적화
     config = QWENGRPOConfig(
         learning_rate=1e-6,
-        batch_size=4,  # 멀티 GPU로 배치 크기 복원
-        num_rollouts=3,  # 멀티 GPU로 롤아웃 수 복원
+        batch_size=2,  # GPU1 OOM 방지를 위해 배치 크기 축소
+        num_rollouts=2,  # 메모리 절약을 위해 롤아웃 수 축소
         max_prompt_length=77,
-        max_new_tokens=30,
+        max_new_tokens=25,  # 토큰 수 약간 축소
         temperature=1.2,
         top_p=0.9,
         top_k=100,
@@ -163,16 +164,16 @@ def main():
             torch.cuda.empty_cache()
             logger.info("🧹 QWEN 로드 후 메모리 정리")
         
-        # 2. 통합 모델들 로드 (GPU 4번)
-        logger.info("\n🎯 통합 모델들 로딩... (GPU 4번)")
+        # 2. 통합 모델들 로드 (GPU 4번, 5번)
+        logger.info("\n🎯 통합 모델들 로딩... (GPU 4번, 5번)")
         
         # CLIP 리워드 모델 (GPU 4번)
         reward_model = CLIPReward(device="cuda:4")
         logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 4)")
         
-        # Stable Diffusion 3 파이프라인 (GPU 4번)
-        sd_pipeline = load_stable_diffusion_pipeline(device="cuda:4")
-        logger.info("✅ SD3 파이프라인 로드 완료 (GPU 4)")
+        # Stable Diffusion 3 파이프라인 (GPU 5번)
+        sd_pipeline = load_stable_diffusion_pipeline(device="cuda:5")
+        logger.info("✅ SD3 파이프라인 로드 완료 (GPU 5)")
         
         # QWEN Reference 모델을 GPU 4번으로 이동 (이미 생성되었다면)
         if hasattr(qwen_model, 'ref_model') and qwen_model.ref_model is not None:
@@ -218,8 +219,8 @@ def main():
                 state = trainer.env.reset(test_prompt)
                 trainer.env.current_enhanced_prompt = enhanced_prompt
                 
-                # 이미지 생성 (GPU 4번)
-                with torch.cuda.device(4):
+                # 이미지 생성 (GPU 5번)
+                with torch.cuda.device(5):
                     enhanced_result = sd_pipeline(
                         prompt=enhanced_prompt,
                         num_inference_steps=20,
@@ -284,8 +285,8 @@ def main():
                 state = trainer.env.reset(test_prompt)
                 trainer.env.current_enhanced_prompt = grpo_enhanced
                 
-                # 이미지 생성 (GPU 4번)
-                with torch.cuda.device(4):
+                # 이미지 생성 (GPU 5번)
+                with torch.cuda.device(5):
                     enhanced_result = sd_pipeline(
                         prompt=grpo_enhanced,
                         num_inference_steps=20,
