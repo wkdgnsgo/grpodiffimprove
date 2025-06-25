@@ -76,6 +76,13 @@ class QWENGRPOEnvironment:
     
     def step(self, action: int) -> Tuple[Dict, float, bool, Dict]:
         """환경 스텝 - QWEN 후보 중에서 선택"""
+        original_image = None
+        enhanced_image = None
+        original_reward = 0.0
+        enhanced_reward = 0.0
+        total_reward = 0.0
+        candidates = []
+        
         try:
             # QWEN에서 향상된 프롬프트 후보들 생성
             logger.info(f"🧠 QWEN 후보 생성 중... (GPU {self.qwen_device})")
@@ -95,59 +102,70 @@ class QWENGRPOEnvironment:
             
             logger.info(f"✅ 선택된 프롬프트: '{selected_prompt[:50]}...'")
             
-            # 이미지 생성 및 리워드 계산
-            logger.info(f"🖼️  이미지 생성 시작 (GPU {self.sd_device})")
-            
-            with torch.cuda.device(1):
-                # 원본 프롬프트로 이미지 생성
-                original_result = self.sd_pipeline(
-                    prompt=self.current_user_prompt,
-                    num_inference_steps=28,
-                    guidance_scale=7.0,
-                    height=1024,
-                    width=1024
-                )
-                original_image = original_result.images[0]
+            # 이미지 생성 시도
+            try:
+                logger.info(f"🖼️  이미지 생성 시작 (GPU {self.sd_device})")
                 
-                # 향상된 프롬프트로 이미지 생성
-                enhanced_result = self.sd_pipeline(
-                    prompt=self.current_enhanced_prompt,
-                    num_inference_steps=28,
-                    guidance_scale=7.0,
-                    height=1024,
-                    width=1024
-                )
-                enhanced_image = enhanced_result.images[0]
-            
-            logger.info(f"🎯 리워드 계산 시작 (GPU {self.reward_device})")
-            
-            # CLIP 리워드를 GPU 2에서 계산
-            with torch.cuda.device(2):
-                enhanced_reward = self.reward_model.calculate_reward(
-                    self.current_user_prompt,
-                    self.current_enhanced_prompt,
-                    enhanced_image
-                )
+                with torch.cuda.device(1):
+                    # 원본 프롬프트로 이미지 생성
+                    original_result = self.sd_pipeline(
+                        prompt=self.current_user_prompt,
+                        num_inference_steps=28,
+                        guidance_scale=7.0,
+                        height=1024,
+                        width=1024
+                    )
+                    original_image = original_result.images[0]
+                    
+                    # 향상된 프롬프트로 이미지 생성
+                    enhanced_result = self.sd_pipeline(
+                        prompt=self.current_enhanced_prompt,
+                        num_inference_steps=28,
+                        guidance_scale=7.0,
+                        height=1024,
+                        width=1024
+                    )
+                    enhanced_image = enhanced_result.images[0]
                 
-                # 원본 프롬프트 vs 원본 이미지 (참고용)
-                original_reward = self.reward_model.calculate_reward(
-                    self.current_user_prompt,
-                    self.current_user_prompt,
-                    original_image
-                )
+                logger.info(f"✅ 이미지 생성 완료")
+                
+            except Exception as img_error:
+                logger.error(f"❌ 이미지 생성 실패: {img_error}")
+                # 더미 이미지 생성 (검은 이미지)
+                from PIL import Image
+                original_image = Image.new('RGB', (1024, 1024), color='black')
+                enhanced_image = Image.new('RGB', (1024, 1024), color='black')
             
-            # 리워드 계산
-            total_reward = enhanced_reward
-            
-            logger.info(f"✅ 리워드 계산 완료: {total_reward:.4f}")
-            
-            # 이미지 저장 및 로그 기록
-            if self.config.save_images:
-                self._save_episode_results(
-                    original_image, enhanced_image, 
-                    original_reward, enhanced_reward, total_reward,
-                    action, candidates
-                )
+            # 리워드 계산 시도
+            try:
+                logger.info(f"🎯 리워드 계산 시작 (GPU {self.reward_device})")
+                
+                # CLIP 리워드를 GPU 2에서 계산
+                with torch.cuda.device(2):
+                    enhanced_reward = self.reward_model.calculate_reward(
+                        self.current_user_prompt,
+                        self.current_enhanced_prompt,
+                        enhanced_image
+                    )
+                    
+                    # 원본 프롬프트 vs 원본 이미지 (참고용)
+                    original_reward = self.reward_model.calculate_reward(
+                        self.current_user_prompt,
+                        self.current_user_prompt,
+                        original_image
+                    )
+                
+                # 리워드 계산
+                total_reward = enhanced_reward
+                
+                logger.info(f"✅ 리워드 계산 완료: {total_reward:.4f}")
+                
+            except Exception as reward_error:
+                logger.error(f"❌ 리워드 계산 실패: {reward_error}")
+                # 기본 리워드 값 사용
+                original_reward = 0.1
+                enhanced_reward = 0.1
+                total_reward = 0.1
             
             # 다음 상태 (에피소드 완료)
             next_state = {
@@ -170,10 +188,46 @@ class QWENGRPOEnvironment:
             return next_state, total_reward, True, info
             
         except Exception as e:
-            logger.error(f"Step failed: {e}")
+            logger.error(f"❌ 전체 스텝 실패: {e}")
             import traceback
             traceback.print_exc()
-            return None, 0.0, True, {'error': str(e)}
+            
+            # 에러가 발생해도 기본값으로 상태 반환
+            if not candidates:
+                candidates = [self.current_user_prompt]
+            
+            next_state = {
+                'user_prompt': self.current_user_prompt,
+                'enhanced_prompt': self.current_user_prompt,
+                'candidates': candidates,
+                'episode': self.episode_count
+            }
+            
+            info = {
+                'original_prompt': self.current_user_prompt,
+                'enhanced_prompt': self.current_user_prompt,
+                'candidates': candidates,
+                'selected_action': 0,
+                'original_reward': 0.0,
+                'enhanced_reward': 0.0,
+                'error': str(e)
+            }
+            
+            return next_state, 0.0, True, info
+        
+        finally:
+            # 에러 발생 여부와 관계없이 항상 이미지 저장 시도
+            if self.config.save_images and original_image is not None and enhanced_image is not None:
+                try:
+                    self._save_episode_results(
+                        original_image, enhanced_image, 
+                        original_reward, enhanced_reward, total_reward,
+                        action, candidates
+                    )
+                except Exception as save_error:
+                    logger.warning(f"⚠️ 이미지 저장 실패: {save_error}")
+                    # 에러 정보라도 저장
+                    self._save_error_log(action, candidates, str(save_error))
     
     def _save_episode_results(self, original_image, enhanced_image, original_reward, enhanced_reward, total_reward, action, candidates):
         """에피소드 결과 저장"""
@@ -221,6 +275,36 @@ Enhanced Image: enhanced_image.png
             
         except Exception as e:
             logger.warning(f"Failed to save episode results: {e}")
+    
+    def _save_error_log(self, action: int, candidates: List[str], error_msg: str):
+        """에러 발생 시 로그만 저장"""
+        try:
+            # 에러 로그 파일 작성
+            error_log_content = f"""=== QWEN GRPO Error Log ===
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Episode: {self.episode_count}
+
+=== Error Info ===
+Error Message: {error_msg}
+Original Prompt: {self.current_user_prompt}
+Selected Action: {action}
+
+=== Available Candidates ===
+{chr(10).join([f"  {i}: {cand}" for i, cand in enumerate(candidates)])}
+
+=== Note ===
+Images could not be generated/saved due to the error above.
+"""
+            
+            # 에러 로그 파일 저장
+            error_log_path = os.path.join(self.episode_dir, "error_log.txt")
+            with open(error_log_path, "w", encoding="utf-8") as f:
+                f.write(error_log_content)
+            
+            logger.info(f"📝 에러 로그 저장 완료: {error_log_path}")
+            
+        except Exception as log_error:
+            logger.error(f"❌ 에러 로그 저장도 실패: {log_error}")
 
 class QWENGRPOTrainer:
     """QWEN 통합 GRPO 트레이너"""
@@ -354,10 +438,13 @@ class QWENGRPOTrainer:
             metrics['epoch'] = epoch + 1
             all_metrics.append(metrics)
             
-            # 주기적으로 샘플 출력 확인
+            # 주기적으로 샘플 출력 확인 (다양한 프롬프트 사용)
             if (epoch + 1) % 3 == 0:
                 logger.info(f"\n📋 에포크 {epoch + 1} 샘플 출력:")
-                self._log_sample_outputs(train_prompts[:2])
+                # 매번 다른 프롬프트 선택 (순환)
+                sample_indices = [(epoch * 2) % len(train_prompts), ((epoch * 2) + 1) % len(train_prompts)]
+                sample_prompts = [train_prompts[i] for i in sample_indices]
+                self._log_sample_outputs(sample_prompts)
         
         logger.info("\n✅ QWEN GRPO 학습 완료!")
         return all_metrics

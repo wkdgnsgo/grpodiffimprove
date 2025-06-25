@@ -63,16 +63,47 @@ def load_stable_diffusion_pipeline(device="cuda:1"):
         raise
 
 def get_training_prompts():
-    """학습용 프롬프트 데이터셋"""
-    return [
-        # 기본 프롬프트
+    """학습용 프롬프트 데이터셋 (다양성 확보)"""
+    import random
+    
+    # 전체 프롬프트 풀
+    all_prompts = [
+        # 동물들
         "a beautiful cat sitting on a chair",
-        "sunset over mountains with golden light",
-        "abstract art painting with vibrant colors",
-        "portrait of a woman with flowing hair",
-        "futuristic city skyline at night",
+        "majestic lion in African savanna",
+        "colorful parrot in tropical rainforest",
+        "graceful swan on peaceful lake",
+        "playful dolphin jumping in ocean",
         
-        # 도전적인 프롬프트 (SD3가 어려워하는 것들)
+        # 자연 풍경
+        "sunset over mountains with golden light",
+        "misty forest with tall pine trees",
+        "desert landscape with sand dunes",
+        "rocky coastline with crashing waves",
+        "cherry blossoms in spring garden",
+        
+        # 예술과 추상
+        "abstract art painting with vibrant colors",
+        "geometric patterns in bright neon colors",
+        "watercolor painting of flowers",
+        "minimalist sculpture in white marble",
+        "street art mural on brick wall",
+        
+        # 인물
+        "portrait of a woman with flowing hair",
+        "elderly man reading book by fireplace",
+        "child playing in summer meadow",
+        "dancer in elegant pose",
+        "musician playing violin on stage",
+        
+        # 도시와 건축
+        "futuristic city skyline at night",
+        "ancient castle on mountain peak",
+        "modern glass building reflecting sky",
+        "cozy cafe with warm lighting",
+        "busy train station with commuters",
+        
+        # 도전적인 프롬프트
         "red apple on blue table with green background",
         "transparent glass sphere floating in purple space",
         "wooden texture mixed with metallic surface",
@@ -86,6 +117,14 @@ def get_training_prompts():
         "steampunk mechanical device with gears and pipes",
         "surreal landscape with floating islands and waterfalls"
     ]
+    
+    # 매번 다른 순서로 섞어서 반환 (다양성 확보)
+    random.shuffle(all_prompts)
+    
+    # 처음 15개 선택 (충분한 다양성 + 적당한 크기)
+    selected_prompts = all_prompts[:15]
+    
+    return selected_prompts
 
 def main():
     """메인 학습 함수"""
@@ -169,7 +208,11 @@ def main():
         logger.info("\n📊 베이스라인 성능 측정 (기본 QWEN)...")
         baseline_rewards = []
         
-        for i, prompt in enumerate(train_prompts[:3]):  # 처음 3개로 베이스라인 측정
+        # 다양한 프롬프트로 베이스라인 측정 (첫 번째, 중간, 마지막)
+        baseline_test_indices = [0, len(train_prompts)//2, len(train_prompts)-1]
+        baseline_test_prompts = [train_prompts[i] for i in baseline_test_indices]
+        
+        for i, prompt in enumerate(baseline_test_prompts):
             logger.info(f"  테스트 {i+1}/3: '{prompt}'")
             
             try:
@@ -224,7 +267,8 @@ def main():
         logger.info("\n📊 학습 후 성능 측정 (GRPO)...")
         trained_rewards = []
         
-        for i, prompt in enumerate(train_prompts[:3]):  # 같은 프롬프트로 평가
+        # 베이스라인과 같은 프롬프트로 평가
+        for i, prompt in enumerate(baseline_test_prompts):
             logger.info(f"  평가 {i+1}/3: '{prompt}'")
             
             try:
