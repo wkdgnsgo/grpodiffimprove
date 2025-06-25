@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+import copy
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, GenerationConfig
 from peft import LoraConfig, get_peft_model, TaskType
 import re
@@ -150,6 +151,22 @@ class QWENModel:
         
         # Reference 모델은 항상 활성화 (KL penalty 필요)
         logger.info("🎯 Reference 모델 활성화 (KL penalty 계산용)")
+        
+        # Reference 모델 생성 (메인 프로세스에서만)
+        if self.is_main_process:
+            logger.info("🔧 Reference 모델 생성 중...")
+            self.ref_model = copy.deepcopy(self.model)
+            self.ref_model.eval()
+            
+            # Reference 모델을 다른 GPU로 이동 (메모리 분산)
+            if torch.cuda.is_available() and torch.cuda.device_count() > 4:
+                self.ref_model = self.ref_model.to("cuda:4")
+                logger.info("✅ Reference 모델을 GPU 4번으로 이동")
+            else:
+                logger.info("✅ Reference 모델 생성 완료 (현재 디바이스)")
+        else:
+            logger.info("🎯 서브 프로세스: Reference 모델 생성 건너뛰기")
+            self.ref_model = None
         
         # 옵티마이저 (LoRA 파라미터만 학습)
         # LoRA 파라미터만 학습하도록 필터링
