@@ -148,9 +148,8 @@ class QWENModel:
         
         logger.info("🔧 GRPO 컴포넌트 초기화 중... (메모리 최적화)")
         
-        # 전체 학습 모드에서는 Reference 모델 비활성화
-        logger.info("🎯 전체 학습 모드: Reference 모델 비활성화 (KL penalty 없음)")
-        self.ref_model = None
+        # Reference 모델은 항상 활성화 (KL penalty 필요)
+        logger.info("🎯 Reference 모델 활성화 (KL penalty 계산용)")
         
         # 옵티마이저 (LoRA 파라미터만 학습)
         # LoRA 파라미터만 학습하도록 필터링

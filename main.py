@@ -93,8 +93,11 @@ def main():
     logger.info("🚀 QWEN 통합 GRPO VLM 학습 시작 (Accelerate 멀티 GPU)")
     logger.info("=" * 80)
     
-    # Accelerate 초기화
-    accelerator = Accelerator()
+    # Accelerate 초기화 (NCCL 에러 방지)
+    accelerator = Accelerator(
+        cpu=not torch.cuda.is_available(),  # CUDA 없으면 CPU 모드
+        device_placement=True
+    )
     logger.info(f"🎯 Accelerate 초기화 완료")
     logger.info(f"  - 프로세스 수: {accelerator.num_processes}")
     logger.info(f"  - 로컬 프로세스 인덱스: {accelerator.local_process_index}")
