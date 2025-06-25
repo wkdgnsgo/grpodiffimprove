@@ -146,15 +146,15 @@ def main():
         logger.info("\n🧠 QWEN VL 모델 + GRPO 로딩... (Accelerate 분산)")
         qwen_model = QWENModel(
             model_name="Qwen/Qwen2-VL-7B-Instruct",
-            device=accelerator.device,  # Accelerate가 관리하는 디바이스
+            device="accelerate",  # Accelerate 전용 모드
             temperature=0.7,
             grpo_config=config  # GRPO 컴포넌트 활성화
         )
         
-        # Accelerate로 모델 준비
-        qwen_model.model, qwen_model.grpo_optimizer = accelerator.prepare(
-            qwen_model.model, qwen_model.grpo_optimizer
-        )
+        # Accelerate로 모델 준비 (단일 호출로 변경)
+        logger.info("🔧 Accelerate를 통한 모델 분산 설정...")
+        qwen_model.model = accelerator.prepare(qwen_model.model)
+        qwen_model.grpo_optimizer = accelerator.prepare(qwen_model.grpo_optimizer)
         
         logger.info("✅ QWEN VL + GRPO 모델 로드 완료 (Accelerate 분산)")
         

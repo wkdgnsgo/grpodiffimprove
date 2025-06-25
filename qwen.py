@@ -55,15 +55,26 @@ class QWENModel:
             )
         self.tokenizer = self.processor.tokenizer
   
-        model_kwargs = {
-            'torch_dtype': torch.float16,
-            'trust_remote_code': True,
-            'low_cpu_mem_usage': True,
-            'device_map': 'auto',  # 자동 GPU 분산
-            'max_memory': {0: "18GB", 1: "8GB", 2: "8GB"}  # GPU별 메모리 제한
-        }
+        # Accelerate 호환을 위한 모델 로딩 설정
+        if self.device in ["cpu", "accelerate"]:
+            # Accelerate가 관리할 경우 device_map 없이 로딩
+            model_kwargs = {
+                'torch_dtype': torch.float16,
+                'trust_remote_code': True,
+                'low_cpu_mem_usage': True,
+                # device_map을 제거하여 Accelerate가 분산 관리하도록 함
+            }
+        else:
+            # 기본 GPU 사용 시
+            model_kwargs = {
+                'torch_dtype': torch.float16,
+                'trust_remote_code': True,
+                'low_cpu_mem_usage': True,
+                'device_map': 'auto',  # 자동 GPU 분산
+                'max_memory': {0: "18GB", 1: "8GB", 2: "8GB"}  # GPU별 메모리 제한
+            }
 
-        logger.info("🔧 QWEN 7B 모델 로딩 중... (메모리 최적화 적용)")
+        logger.info("🔧 QWEN 7B 모델 로딩 중... (Accelerate 호환 모드)")
         
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.model_name,
