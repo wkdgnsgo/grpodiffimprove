@@ -5,6 +5,7 @@ QWEN 모델의 enhance_prompt 기능과 GRPO를 통합한 프롬프트 개선 �
 """
 
 import sys
+import os
 import logging
 import torch
 from pathlib import Path
@@ -113,13 +114,13 @@ def main():
     else:
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
-    # QWEN GRPO 설정 (Accelerate 멀티 GPU) - 메모리 최적화
+    # QWEN GRPO 설정 (Accelerate 멀티 GPU) - GPU 0 OOM 방지
     config = QWENGRPOConfig(
         learning_rate=1e-6,
-        batch_size=2,  # GPU1 OOM 방지를 위해 배치 크기 축소
-        num_rollouts=2,  # 메모리 절약을 위해 롤아웃 수 축소
+        batch_size=1,  # GPU 0 OOM 방지를 위해 배치 크기 1로 축소
+        num_rollouts=1,  # GPU 0 메모리 절약을 위해 롤아웃 수 1로 축소
         max_prompt_length=77,
-        max_new_tokens=25,  # 토큰 수 약간 축소
+        max_new_tokens=20,  # 토큰 수 더 축소
         temperature=1.2,
         top_p=0.9,
         top_k=100,
@@ -138,10 +139,26 @@ def main():
     logger.info(f"  - KL 계수: {config.kl_coef}")
     
     try:
-        # GPU 메모리 정리
+        # GPU 메모리 최적화 설정 (GPU 0 OOM 방지)
         if torch.cuda.is_available():
+            # 메모리 할당 최적화
             torch.cuda.empty_cache()
-            logger.info("🧹 초기 GPU 메모리 정리 완료")
+            
+            # GPU 0 메모리 제한 설정 (GPU 0 OOM 방지)
+            if accelerator.local_process_index == 0:
+                # GPU 0은 메인 프로세스로 메모리 사용량이 높으므로 제한
+                torch.cuda.set_per_process_memory_fraction(0.8, device=0)
+                logger.info("🔧 GPU 0 메모리 제한 설정: 80% (메인 프로세스)")
+            else:
+                # 다른 GPU들은 90% 사용 가능
+                device_idx = accelerator.local_process_index
+                torch.cuda.set_per_process_memory_fraction(0.9, device=device_idx)
+                logger.info(f"🔧 GPU {device_idx} 메모리 제한 설정: 90%")
+            
+            # PyTorch 메모리 할당 최적화
+            os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+            
+            logger.info("🧹 초기 GPU 메모리 정리 및 최적화 완료")
         
         # 1. QWEN VL 모델 로드 (Accelerate로 분산)
         logger.info("\n🧠 QWEN VL 모델 + GRPO 로딩... (Accelerate 분산)")

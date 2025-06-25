@@ -19,10 +19,10 @@ gradient_accumulation_steps: 2
 dataloader_config:
   split_batches: true
 
-# DeepSpeed ZeRO 스테이지 2 활성화 (메모리 절약)
+# DeepSpeed ZeRO 스테이지 2 활성화 (GPU 0 OOM 방지)
 deepspeed_config:
-  gradient_accumulation_steps: 2
-  train_batch_size: 8
+  gradient_accumulation_steps: 4
+  train_batch_size: 4
   train_micro_batch_size_per_gpu: 1
 
   zero_optimization:
@@ -48,7 +48,11 @@ deepspeed_config:
   activation_checkpointing:
     partition_activations: true
     cpu_checkpointing: true
-    contiguous_memory_optimization: false
+    contiguous_memory_optimization: true
     number_checkpoints: null
     synchronize_checkpoint_boundary: false
     profile: false
+
+  # GPU 0 OOM 방지를 위한 추가 메모리 최적화
+  memory_efficient_attention: true
+  max_memory_MB: 30000 # GPU 0에 대한 메모리 제한
