@@ -301,7 +301,7 @@ def main():
         
         all_metrics, baseline_data = trainer.train(
             train_prompts=train_prompts, 
-            num_epochs=8,  # 멀티 GPU로 에포크 수 증가
+            num_epochs=12,  # LoRA로 더 많은 에포크 가능
             num_baseline_episodes=2
         )
         
@@ -366,25 +366,50 @@ def main():
             else:
                 logger.info("⚠️ GRPO 학습 개선이 미미합니다. 더 많은 학습이 필요할 수 있습니다.")
             
-            # 9. 모델 저장 (메인 프로세스에서만)
-            logger.info("\n💾 모델 저장...")
+            # 9. LoRA 모델 저장 (메인 프로세스에서만)
+            logger.info("\n💾 LoRA 모델 저장...")
             save_dir = Path("checkpoints")
             save_dir.mkdir(exist_ok=True)
             
-            # Accelerate unwrap으로 원본 모델 저장
+            # LoRA 어댑터 저장
+            lora_path = save_dir / "qwen_grpo_lora"
+            
+            # Accelerate unwrap으로 원본 LoRA 모델 가져오기
             unwrapped_model = accelerator.unwrap_model(qwen_model.model)
             
-            model_path = save_dir / "qwen_grpo_model.pth"
-            torch.save({
-                'model_state_dict': unwrapped_model.state_dict(),
-                'config': config,
+            # LoRA 어댑터만 저장
+            unwrapped_model.save_pretrained(lora_path)
+            
+            # 메타데이터 저장
+            metadata_path = save_dir / "training_metadata.json"
+            import json
+            metadata = {
                 'baseline_reward': avg_baseline,
                 'trained_reward': avg_trained,
                 'improvement': avg_trained - avg_baseline,
-                'training_metrics': all_metrics
-            }, model_path)
+                'lora_config': {
+                    'r': 16,
+                    'alpha': 32,
+                    'dropout': 0.1
+                },
+                'training_config': {
+                    'learning_rate': config.learning_rate,
+                    'batch_size': config.batch_size,
+                    'num_epochs': 8
+                }
+            }
             
-            logger.info(f"✅ 모델 저장 완료: {model_path}")
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            logger.info(f"✅ LoRA 모델 저장 완료: {lora_path}")
+            logger.info(f"✅ 메타데이터 저장 완료: {metadata_path}")
+            
+            # LoRA 파라미터 정보 출력
+            lora_info = qwen_model.get_lora_trainable_params()
+            logger.info(f"📊 LoRA 학습 파라미터: {lora_info['trainable_params']:,}")
+            logger.info(f"📊 전체 파라미터: {lora_info['all_params']:,}")
+            logger.info(f"📊 학습 비율: {lora_info['trainable_percentage']:.2f}%")
         
         # 최종 메모리 정리
         if torch.cuda.is_available():

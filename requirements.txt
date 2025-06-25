@@ -36,4 +36,8 @@ imageio>=2.25.0
 # 기타 유틸리티
 datasets>=2.14.0
 huggingface-hub>=0.17.0
-einops>=0.7.0 
+einops>=0.7.0
+
+# LoRA 및 Parameter Efficient Fine-tuning
+peft>=0.6.0
+bitsandbytes>=0.41.0 

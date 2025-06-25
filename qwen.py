@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, GenerationConfig
+from peft import LoraConfig, get_peft_model, TaskType
 import re
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
@@ -11,10 +12,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QWENGRPOConfig:
-    """QWEN GRPO 통합 설정"""
-    learning_rate: float = 1e-6
-    batch_size: int = 4
-    num_rollouts: int = 5
+    """QWEN GRPO 통합 설정 (LoRA 최적화)"""
+    learning_rate: float = 2e-4  # LoRA는 더 높은 학습률 사용 가능
+    batch_size: int = 8  # LoRA로 메모리 절약되어 배치 크기 증가 가능
+    num_rollouts: int = 6  # 더 많은 롤아웃 가능
     max_prompt_length: int = 77
     max_new_tokens: int = 30
     temperature: float = 1.0
@@ -75,12 +76,28 @@ class QWENModel:
                 'max_memory': {0: "18GB", 1: "8GB", 2: "8GB"}  # GPU별 메모리 제한
             }
 
-        logger.info("🔧 QWEN 7B 모델 로딩 중... (Accelerate 호환 모드)")
+        logger.info("🔧 QWEN 7B 모델 로딩 중... (LoRA + Accelerate 모드)")
         
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.model_name,
                 **model_kwargs
         )
+        
+        # LoRA 설정 및 적용
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=16,  # LoRA rank (메모리와 성능의 균형)
+            lora_alpha=32,  # LoRA scaling parameter
+            lora_dropout=0.1,
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # Qwen2-VL 타겟 모듈
+            bias="none",
+            inference_mode=False,
+        )
+        
+        # LoRA 어댑터 적용
+        self.model = get_peft_model(self.model, lora_config)
+        logger.info("✅ LoRA 어댑터 적용 완료")
+        logger.info(f"📊 학습 가능한 파라미터: {self.model.get_nb_trainable_parameters()}")
         
         # 메모리 최적화 설정
         if hasattr(self.model, 'gradient_checkpointing_enable'):
@@ -135,9 +152,17 @@ class QWENModel:
         logger.info("🎯 전체 학습 모드: Reference 모델 비활성화 (KL penalty 없음)")
         self.ref_model = None
         
-        # 옵티마이저 (QWEN 모델만 학습)
+        # 옵티마이저 (LoRA 파라미터만 학습)
+        # LoRA 파라미터만 학습하도록 필터링
+        trainable_params = []
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                trainable_params.append(param)
+        
+        logger.info(f"📊 LoRA 학습 파라미터 개수: {len(trainable_params)}")
+        
         self.grpo_optimizer = torch.optim.AdamW(
-            self.model.parameters(), 
+            trainable_params, 
             lr=self.grpo_config.learning_rate,
             weight_decay=0.01
         )
@@ -579,12 +604,41 @@ class QWENModel:
         return results
 
     def move_ref_model_to_device(self, device: str):
-        """Reference model을 특정 디바이스로 이동 (Accelerate 환경용)"""
+        """Reference 모델을 지정된 디바이스로 이동 (전체 학습에서는 비활성화)"""
         if self.ref_model is not None:
-            try:
-                self.ref_model = self.ref_model.to(device)
-                logger.info(f"✅ Reference model을 {device}로 이동 완료")
-            except Exception as e:
-                logger.warning(f"⚠️ Reference model 이동 실패: {e}")
+            logger.info(f"🔧 Reference 모델을 {device}로 이동")
+            self.ref_model = self.ref_model.to(device)
         else:
-            logger.info("📍 Reference model이 없어서 이동하지 않음")
+            logger.info("🎯 전체 학습 모드: Reference 모델 이동 건너뛰기")
+    
+    def save_lora_model(self, save_path: str):
+        """LoRA 어댑터 저장"""
+        try:
+            self.model.save_pretrained(save_path)
+            logger.info(f"✅ LoRA 모델 저장 완료: {save_path}")
+        except Exception as e:
+            logger.error(f"❌ LoRA 모델 저장 실패: {e}")
+    
+    def load_lora_model(self, load_path: str):
+        """LoRA 어댑터 로드"""
+        try:
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, load_path)
+            logger.info(f"✅ LoRA 모델 로드 완료: {load_path}")
+        except Exception as e:
+            logger.error(f"❌ LoRA 모델 로드 실패: {e}")
+    
+    def get_lora_trainable_params(self):
+        """LoRA 학습 가능한 파라미터 정보 반환"""
+        trainable_params = 0
+        all_param = 0
+        for _, param in self.model.named_parameters():
+            all_param += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+        
+        return {
+            'trainable_params': trainable_params,
+            'all_params': all_param,
+            'trainable_percentage': 100 * trainable_params / all_param
+        }
