@@ -2,11 +2,11 @@
 
 #SBATCH --job-name=pure-grpo-vlm # 순수 GRPO VLM 학습
 #SBATCH --nodes=1
-#SBATCH --nodelist=hpc-pr-a-pod16
+#SBATCH --nodelist=hpc-pr-a-pod20
 #SBATCH --ntasks-per-node=1 # total number of tasks per node
 #SBATCH --cpus-per-task=4 # cpu-cores per task (멀티 GPU 처리용)
 #SBATCH --gres=gpu:3 # 최소 3개 GPU 필요 (QWEN, SD3, CLIP)
-#SBATCH --time=24:00:00 # total run time limit (HH:MM:SS)
+#SBATCH --time=12:00:00 # total run time limit (HH:MM:SS)
 #SBATCH --output=grpo_training.out
 #SBATCH --error=grpo_training.err
 #SBATCH --mail-type=begin # send email when job begins

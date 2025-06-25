@@ -157,7 +157,7 @@ def main():
         kl_coef=0.02,
         clip_ratio=0.2,
         entropy_coef=0.01,
-        num_enhancement_candidates=5,  # 5개 후보 중 선택
+        num_enhancement_candidates=15,  # 5개 후보 중 선택
         save_images=True,
         log_dir="qwen_grpo_results"
     )
@@ -258,7 +258,7 @@ def main():
         logger.info("\n🚀 QWEN GRPO 학습 시작...")
         logger.info("=" * 80)
         
-        num_epochs = 8
+        num_epochs = 50
         all_metrics = trainer.train(train_prompts, num_epochs=num_epochs)
         
         logger.info("✅ 학습 완료!")

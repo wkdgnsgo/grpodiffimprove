@@ -328,26 +328,37 @@ class QWENGRPOTrainer:
         self.episode_numbers = []
         self.running_avg_rewards = []
         
+        # 플롯 저장을 위한 디렉토리 설정 (Environment와 동일한 디렉토리 사용)
+        self.plot_save_dir = self.env.base_log_dir if config.save_images else config.log_dir
+        os.makedirs(self.plot_save_dir, exist_ok=True)
+        
         # 플롯 설정
         mplstyle.use('fast')
         plt.ion()  # Interactive mode on
         
         logger.info("🎯 QWEN GRPO 트레이너 초기화 완료")
         logger.info(f"✅ Action Space: {config.num_enhancement_candidates} enhancement candidates")
+        logger.info(f"📊 플롯 저장 디렉토리: {self.plot_save_dir}")
     
-    def collect_rollouts(self, prompts: List[str]) -> List[Dict]:
+    def collect_rollouts(self, prompts: List[str], is_baseline: bool = False) -> List[Dict]:
         """롤아웃 수집"""
         all_experiences = []
+        rollout_type = "베이스라인" if is_baseline else "학습용"
         
         for prompt_idx, user_prompt in enumerate(prompts):
-            logger.info(f"\n📝 프롬프트 {prompt_idx + 1}/{len(prompts)}: '{user_prompt}'")
+            logger.info(f"\n📝 {rollout_type} 프롬프트 {prompt_idx + 1}/{len(prompts)}: '{user_prompt}'")
             
             # 프롬프트별 롤아웃 수집
             for rollout_idx in range(self.config.num_rollouts):
-                logger.info(f"  🎲 롤아웃 {rollout_idx + 1}/{self.config.num_rollouts}")
+                logger.info(f"  🎲 {rollout_type} 롤아웃 {rollout_idx + 1}/{self.config.num_rollouts}")
                 
                 try:
-                    # 환경 리셋
+                    # 환경 리셋 (베이스라인일 때는 이미지 저장 안함)
+                    if is_baseline:
+                        # 베이스라인 수집 시에는 이미지 저장 비활성화
+                        original_save_setting = self.config.save_images
+                        self.config.save_images = False
+                    
                     state = self.env.reset(user_prompt)
                     
                     # QWEN GRPO로 액션 선택
@@ -359,6 +370,10 @@ class QWENGRPOTrainer:
                     # 환경 스텝 실행
                     next_state, reward, done, info = self.env.step(action)
                     
+                    # 베이스라인일 때는 설정 복원
+                    if is_baseline:
+                        self.config.save_images = original_save_setting
+                    
                     if next_state is not None:
                         # 경험 저장
                         experience = {
@@ -367,19 +382,23 @@ class QWENGRPOTrainer:
                             'log_prob': log_prob,
                             'reward': reward,
                             'candidates': candidates,
-                            'info': info
+                            'info': info,
+                            'is_baseline': is_baseline
                         }
                         
                         all_experiences.append(experience)
-                        logger.info(f"    ✅ 리워드: {reward:.4f}")
+                        logger.info(f"    ✅ {rollout_type} 리워드: {reward:.4f}")
                     else:
-                        logger.warning(f"    ❌ 롤아웃 실패")
+                        logger.warning(f"    ❌ {rollout_type} 롤아웃 실패")
                 
                 except Exception as e:
-                    logger.error(f"    ❌ 롤아웃 오류: {e}")
+                    logger.error(f"    ❌ {rollout_type} 롤아웃 오류: {e}")
+                    # 베이스라인일 때 설정 복원 (에러 상황에서도)
+                    if is_baseline and 'original_save_setting' in locals():
+                        self.config.save_images = original_save_setting
                     continue
         
-        logger.info(f"\n📊 수집된 경험: {len(all_experiences)}개")
+        logger.info(f"\n📊 수집된 {rollout_type} 경험: {len(all_experiences)}개")
         return all_experiences
     
     def compute_grpo_advantages(self, experiences: List[Dict]) -> List[Dict]:
@@ -426,19 +445,65 @@ class QWENGRPOTrainer:
         
         return metrics
     
-    def train(self, train_prompts: List[str], num_epochs: int = 10):
+    def collect_baseline_data(self, train_prompts: List[str], num_baseline_episodes: int = 3):
+        """베이스라인 데이터 수집 (학습에 사용되지 않음)"""
+        logger.info(f"📊 베이스라인 데이터 수집 시작 ({num_baseline_episodes} 에피소드)")
+        logger.info("=" * 80)
+        
+        baseline_experiences = []
+        
+        for episode in range(num_baseline_episodes):
+            logger.info(f"\n📋 베이스라인 에피소드 {episode + 1}/{num_baseline_episodes}")
+            logger.info("-" * 60)
+            
+            # 베이스라인용 롤아웃 수집 (저장하지 않음)
+            episode_experiences = self.collect_rollouts(train_prompts, is_baseline=True)
+            baseline_experiences.extend(episode_experiences)
+            
+            if episode_experiences:
+                episode_rewards = [exp['reward'] for exp in episode_experiences]
+                avg_reward = np.mean(episode_rewards)
+                logger.info(f"📈 베이스라인 에피소드 {episode + 1} 평균 리워드: {avg_reward:.4f}")
+        
+        # 베이스라인 통계 계산
+        if baseline_experiences:
+            baseline_rewards = [exp['reward'] for exp in baseline_experiences]
+            baseline_mean = np.mean(baseline_rewards)
+            baseline_std = np.std(baseline_rewards)
+            
+            logger.info("\n📊 베이스라인 통계:")
+            logger.info(f"  평균 리워드: {baseline_mean:.4f}")
+            logger.info(f"  표준편차: {baseline_std:.4f}")
+            logger.info(f"  최대 리워드: {np.max(baseline_rewards):.4f}")
+            logger.info(f"  최소 리워드: {np.min(baseline_rewards):.4f}")
+            logger.info(f"  총 경험 수: {len(baseline_experiences)}개")
+        
+        # 환경 에피소드 카운터 리셋 (실제 학습은 1부터 시작)
+        self.env.episode_count = 0
+        logger.info("\n🔄 환경 에피소드 카운터 리셋 완료")
+        logger.info("✅ 베이스라인 데이터 수집 완료!")
+        
+        return baseline_experiences
+
+    def train(self, train_prompts: List[str], num_epochs: int = 10, num_baseline_episodes: int = 3):
         """GRPO 학습 실행"""
-        logger.info(f"🚀 QWEN GRPO 학습 시작 (에포크: {num_epochs})")
+        logger.info(f"🚀 QWEN GRPO 학습 시작")
+        logger.info("=" * 80)
+        
+        # 1단계: 베이스라인 데이터 수집 (학습에 사용되지 않음)
+        baseline_data = self.collect_baseline_data(train_prompts, num_baseline_episodes)
+        
+        logger.info(f"\n🎯 실제 GRPO 학습 시작 (에포크: {num_epochs})")
         logger.info("=" * 80)
         
         all_metrics = []
         
         for epoch in range(num_epochs):
-            logger.info(f"\n🔄 에포크 {epoch + 1}/{num_epochs}")
+            logger.info(f"\n🔄 학습 에포크 {epoch + 1}/{num_epochs}")
             logger.info("-" * 60)
             
-            # 롤아웃 수집
-            experiences = self.collect_rollouts(train_prompts)
+            # 학습용 롤아웃 수집
+            experiences = self.collect_rollouts(train_prompts, is_baseline=False)
             
             if not experiences:
                 logger.warning("⚠️ 수집된 경험이 없습니다. 다음 에포크로 건너뜁니다.")
@@ -465,7 +530,7 @@ class QWENGRPOTrainer:
         # 최종 플롯 저장
         self._save_reward_plot()
         logger.info("\n✅ QWEN GRPO 학습 완료!")
-        return all_metrics
+        return all_metrics, baseline_data
     
     def _log_sample_outputs(self, sample_prompts: List[str]):
         """샘플 출력 로깅"""
@@ -572,13 +637,13 @@ class QWENGRPOTrainer:
             
             # 저장
             if self.config.save_images:
-                plot_path = os.path.join(self.config.log_dir, 'training_progress.png')
+                plot_path = os.path.join(self.plot_save_dir, 'training_progress.png')
                 plt.savefig(plot_path, dpi=300, bbox_inches='tight')
                 logger.info(f"📊 학습 진행 플롯 저장: {plot_path}")
                 
                 # 데이터도 CSV로 저장
                 import csv
-                csv_path = os.path.join(self.config.log_dir, 'training_rewards.csv')
+                csv_path = os.path.join(self.plot_save_dir, 'training_rewards.csv')
                 with open(csv_path, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
                     writer.writerow(['Epoch', 'Average_Reward', 'Moving_Average'])
