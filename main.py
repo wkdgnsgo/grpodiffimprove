@@ -189,28 +189,23 @@ def main():
             torch.cuda.empty_cache()
             logger.info("🧹 QWEN 로드 후 메모리 정리")
         
-        # 2. 통합 모델들 로드 (GPU 4번, 5번) - 메인 프로세스에서만
-        logger.info("\n🎯 통합 모델들 로딩 체크...")
+        # 2. 통합 모델들 로드 (GPU 4번, 6번) - LoRA로 메모리 절약되어 모든 프로세스에서 로딩
+        logger.info("\n🎯 통합 모델들 로딩 (LoRA 메모리 절약으로 모든 프로세스 로딩)")
         
-        # 메인 프로세스에서만 로딩
-        if accelerator.is_main_process:
-            logger.info("🎯 메인 프로세스: 통합 모델들 로딩 (GPU 4-7)")
-            
-            # CLIP 리워드 모델 (GPU 4번 메인)
-            reward_model = CLIPReward(device="cuda:4")
-            logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 4)")
-            
-            # Stable Diffusion 3 파이프라인 (GPU 6번 메인) - 1개만 로딩
-            sd_pipeline = load_stable_diffusion_pipeline(device="cuda:6")
-            logger.info("✅ SD3 파이프라인 로드 완료 (GPU 6) - 1개만 로딩")
-            
-            # Reference 모델은 전체 학습에서 비활성화
-            logger.info("🎯 전체 학습 모드: Reference 모델 비활성화")
-        else:
-            # 서브 프로세스에서는 로딩하지 않음
-            logger.info("🎯 서브 프로세스: 통합 모델들 로딩 건너뛰기")
-            reward_model = None
-            sd_pipeline = None
+        # 프로세스별 GPU 할당
+        process_id = accelerator.process_index
+        logger.info(f"🎯 프로세스 {process_id}: 통합 모델들 로딩")
+        
+        # CLIP 리워드 모델 (GPU 4번)
+        reward_model = CLIPReward(device="cuda:4")
+        logger.info(f"✅ 프로세스 {process_id}: CLIP 리워드 모델 로드 완료 (GPU 4)")
+        
+        # Stable Diffusion 3 파이프라인 (GPU 6번)
+        sd_pipeline = load_stable_diffusion_pipeline(device="cuda:6")
+        logger.info(f"✅ 프로세스 {process_id}: SD3 파이프라인 로드 완료 (GPU 6)")
+        
+        # Reference 모델은 LoRA 학습에서 비활성화
+        logger.info("🎯 LoRA 학습 모드: Reference 모델 비활성화")
         
         # 모든 프로세스 동기화 (메인 프로세스의 모델 로딩 완료 대기)
         accelerator.wait_for_everyone()
@@ -220,14 +215,19 @@ def main():
             torch.cuda.empty_cache()
             logger.info("🧹 모든 모델 로드 후 메모리 정리")
         
-        # 3. QWEN GRPO 트레이너 초기화 (Accelerate 버전)
-        logger.info("\n🎯 QWEN GRPO 트레이너 초기화... (Accelerate)")
+        # 3. QWEN GRPO 트레이너 초기화 (LoRA + Accelerate 버전)
+        logger.info("\n🎯 QWEN GRPO 트레이너 초기화... (LoRA + Accelerate)")
         trainer = QWENGRPOTrainer(qwen_model, reward_model, sd_pipeline, config)
         
         # Accelerator를 트레이너에 전달
         trainer.accelerator = accelerator
+        trainer.process_id = accelerator.process_index
         
-        logger.info("✅ 트레이너 초기화 완료 (Accelerate)")
+        # 환경에도 process_id 설정
+        trainer.env.process_id = accelerator.process_index
+        trainer.env.is_main_process = accelerator.is_main_process
+        
+        logger.info(f"✅ 트레이너 초기화 완료 (LoRA + Accelerate, 프로세스 {accelerator.process_index})")
         
         # 4. 학습 데이터 준비
         train_prompts = get_training_prompts()

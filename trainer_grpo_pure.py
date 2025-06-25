@@ -78,22 +78,10 @@ class QWENGRPOEnvironment:
         }
     
     def step(self, enhanced_prompt: str) -> Tuple[Dict, float, bool, Dict]:
-        """환경 스텝 - QWEN에서 생성된 향상된 프롬프트 사용 (Accelerate 지원)"""
-        # 서브 프로세스에서는 더미 값 반환
-        if not self.is_main_process:
-            logger.info("🎯 서브 프로세스: 더미 값 반환")
-            next_state = {
-                'user_prompt': self.current_user_prompt,
-                'enhanced_prompt': enhanced_prompt,
-                'episode': self.episode_count
-            }
-            info = {
-                'original_prompt': self.current_user_prompt,
-                'enhanced_prompt': enhanced_prompt,
-                'original_reward': 0.5,
-                'enhanced_reward': 0.5
-            }
-            return next_state, 0.5, True, info
+        """환경 스텝 - QWEN에서 생성된 향상된 프롬프트 사용 (LoRA 모든 프로세스 지원)"""
+        # LoRA로 메모리 절약되어 모든 프로세스에서 실제 계산 수행
+        process_id = getattr(self, 'process_id', 0)
+        logger.info(f"🎯 프로세스 {process_id}: 실제 리워드 계산 수행")
         
         original_image = None
         enhanced_image = None
