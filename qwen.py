@@ -109,17 +109,27 @@ class QWENModel:
         logger.info("✅ LoRA 어댑터 적용 완료")
         
         # LoRA 파라미터 정보 출력
-        trainable_params = self.model.get_nb_trainable_parameters()
-        all_params = self.model.num_parameters()
-        trainable_percentage = 100 * trainable_params / all_params
-        
-        logger.info(f"📊 LoRA 파라미터 정보:")
-        logger.info(f"  - 학습 가능한 파라미터: {trainable_params:,}")
-        logger.info(f"  - 전체 파라미터: {all_params:,}")
-        logger.info(f"  - 학습 비율: {trainable_percentage:.2f}%")
-        logger.info(f"  - LoRA rank: {lora_config.r}")
-        logger.info(f"  - LoRA alpha: {lora_config.lora_alpha}")
-        logger.info(f"  - 타겟 모듈: {lora_config.target_modules}")
+        try:
+            # get_nb_trainable_parameters()가 튜플을 반환할 수 있음
+            trainable_result = self.model.get_nb_trainable_parameters()
+            if isinstance(trainable_result, tuple):
+                trainable_params = trainable_result[0]  # 첫 번째 값이 학습 가능한 파라미터 수
+            else:
+                trainable_params = trainable_result
+            
+            all_params = self.model.num_parameters()
+            trainable_percentage = 100 * trainable_params / all_params
+            
+            logger.info(f"📊 LoRA 파라미터 정보:")
+            logger.info(f"  - 학습 가능한 파라미터: {trainable_params:,}")
+            logger.info(f"  - 전체 파라미터: {all_params:,}")
+            logger.info(f"  - 학습 비율: {trainable_percentage:.2f}%")
+            logger.info(f"  - LoRA rank: {lora_config.r}")
+            logger.info(f"  - LoRA alpha: {lora_config.lora_alpha}")
+            logger.info(f"  - 타겟 모듈: {lora_config.target_modules}")
+        except Exception as e:
+            logger.warning(f"⚠️ LoRA 파라미터 정보 출력 실패: {e}")
+            logger.info("✅ LoRA 어댑터는 정상적으로 적용됨")
         
         # 메모리 최적화 설정
         if hasattr(self.model, 'gradient_checkpointing_enable'):
