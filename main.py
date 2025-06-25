@@ -145,10 +145,10 @@ def main():
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
     # QWEN GRPO 설정
-    config = QWENGRPOConfig(
+            config = QWENGRPOConfig(
         learning_rate=1e-6,
         batch_size=4,
-        num_rollouts=3,  # 롤아웃 수 줄임 (각 프롬프트당 3개 후보)
+        num_rollouts=3,  # 롤아웃 수 줄임 (각 프롬프트당 3개 롤아웃)
         max_prompt_length=77,
         max_new_tokens=30,
         temperature=1.2,
@@ -157,7 +157,6 @@ def main():
         kl_coef=0.02,
         clip_ratio=0.2,
         entropy_coef=0.01,
-        num_enhancement_candidates=15,  # 5개 후보 중 선택
         save_images=True,
         log_dir="qwen_grpo_results"
     )
@@ -166,7 +165,7 @@ def main():
     logger.info(f"  - 학습률: {config.learning_rate}")
     logger.info(f"  - 배치 크기: {config.batch_size}")
     logger.info(f"  - 롤아웃 수: {config.num_rollouts}")
-    logger.info(f"  - 후보 개수: {config.num_enhancement_candidates}")
+    logger.info(f"  - 롤아웃 수: {config.num_rollouts}")
     logger.info(f"  - 온도: {config.temperature}")
     logger.info(f"  - KL 계수: {config.kl_coef}")
     
@@ -277,8 +276,7 @@ def main():
             try:
                 # GRPO 기반 향상
                 with torch.cuda.device(0):
-                    action, log_prob, candidates = qwen_model.get_grpo_action_and_log_prob(prompt)
-                    grpo_enhanced = candidates[action] if 0 <= action < len(candidates) else candidates[0]
+                    grpo_enhanced, log_prob = qwen_model.generate_grpo_enhanced_prompt(prompt)
                 
                 # 이미지 생성 및 리워드 계산
                 state = trainer.env.reset(prompt)
@@ -334,9 +332,9 @@ def main():
         save_dir = Path("checkpoints")
         save_dir.mkdir(exist_ok=True)
         
-        model_path = save_dir / "qwen_grpo_policy.pth"
+        model_path = save_dir / "qwen_grpo_model.pth"
         torch.save({
-            'grpo_policy_state_dict': qwen_model.grpo_policy_head.state_dict(),
+            'model_state_dict': qwen_model.model.state_dict(),
             'config': config,
             'baseline_reward': avg_baseline,
             'trained_reward': avg_trained,

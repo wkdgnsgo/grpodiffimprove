@@ -38,7 +38,6 @@ class QWENGRPOEnvironment:
         
         self.current_user_prompt = ""
         self.current_enhanced_prompt = ""
-        self.current_candidates = []
         self.episode_count = 0
         
         # 로깅 디렉토리 설정
@@ -51,7 +50,6 @@ class QWENGRPOEnvironment:
         """환경 리셋"""
         self.current_user_prompt = user_prompt
         self.current_enhanced_prompt = ""
-        self.current_candidates = []
         self.episode_count += 1
         
         # 에피소드 디렉토리 생성
@@ -72,37 +70,24 @@ class QWENGRPOEnvironment:
         return {
             'user_prompt': self.current_user_prompt,
             'enhanced_prompt': '',
-            'candidates': [],
             'episode': self.episode_count
         }
     
-    def step(self, action: int) -> Tuple[Dict, float, bool, Dict]:
-        """환경 스텝 - QWEN 후보 중에서 선택"""
+    def step(self, enhanced_prompt: str) -> Tuple[Dict, float, bool, Dict]:
+        """환경 스텝 - QWEN에서 생성된 향상된 프롬프트 사용"""
         original_image = None
         enhanced_image = None
         original_reward = 0.0
         enhanced_reward = 0.0
         total_reward = 0.0
-        candidates = []
         
         try:
-            # QWEN에서 향상된 프롬프트 후보들 생성
-            logger.info(f"🧠 QWEN 후보 생성 중... (GPU {self.qwen_device})")
-            with torch.cuda.device(0):
-                candidates = self.qwen_model.generate_enhancement_candidates(self.current_user_prompt)
+            # QWEN에서 이미 생성된 향상된 프롬프트 사용
+            logger.info(f"🧠 QWEN 생성된 프롬프트 사용 (GPU {self.qwen_device})")
             
-            self.current_candidates = candidates
+            self.current_enhanced_prompt = enhanced_prompt
             
-            # 액션에 해당하는 후보 선택
-            if 0 <= action < len(candidates):
-                selected_prompt = candidates[action]
-            else:
-                logger.warning(f"Invalid action {action}, using first candidate")
-                selected_prompt = candidates[0] if candidates else self.current_user_prompt
-            
-            self.current_enhanced_prompt = selected_prompt
-            
-            logger.info(f"✅ 선택된 프롬프트: '{selected_prompt[:50]}...'")
+            logger.info(f"✅ 사용된 프롬프트: '{enhanced_prompt[:50]}...'")
             
             # 이미지 생성 시도
             try:
@@ -173,15 +158,12 @@ class QWENGRPOEnvironment:
             next_state = {
                 'user_prompt': self.current_user_prompt,
                 'enhanced_prompt': self.current_enhanced_prompt,
-                'candidates': self.current_candidates,
                 'episode': self.episode_count
             }
             
             info = {
                 'original_prompt': self.current_user_prompt,
                 'enhanced_prompt': self.current_enhanced_prompt,
-                'candidates': self.current_candidates,
-                'selected_action': action,
                 'original_reward': original_reward,
                 'enhanced_reward': enhanced_reward
             }
@@ -194,22 +176,15 @@ class QWENGRPOEnvironment:
             import traceback
             traceback.print_exc()
             
-            # 에러가 발생해도 기본값으로 상태 반환
-            if not candidates:
-                candidates = [self.current_user_prompt]
-            
             next_state = {
                 'user_prompt': self.current_user_prompt,
                 'enhanced_prompt': self.current_user_prompt,
-                'candidates': candidates,
                 'episode': self.episode_count
             }
             
             info = {
                 'original_prompt': self.current_user_prompt,
                 'enhanced_prompt': self.current_user_prompt,
-                'candidates': candidates,
-                'selected_action': 0,
                 'original_reward': 0.0,
                 'enhanced_reward': 0.0,
                 'error': str(e)
@@ -224,22 +199,19 @@ class QWENGRPOEnvironment:
                     self._save_episode_results(
                         original_image, enhanced_image, 
                         original_reward, enhanced_reward, total_reward,
-                        action, candidates
+                        enhanced_prompt
                     )
                 except Exception as save_error:
                     logger.warning(f"⚠️ 이미지 저장 실패: {save_error}")
                     # 에러 정보라도 저장
-                    self._save_error_log(action, candidates, str(save_error))
+                    self._save_error_log(enhanced_prompt, str(save_error))
     
-    def _save_episode_results(self, original_image, enhanced_image, original_reward, enhanced_reward, total_reward, action, candidates):
+    def _save_episode_results(self, original_image, enhanced_image, original_reward, enhanced_reward, total_reward, enhanced_prompt):
         """에피소드 결과 저장"""
         try:
             # 이미지 저장
             original_image.save(os.path.join(self.episode_dir, "original_image.png"))
             enhanced_image.save(os.path.join(self.episode_dir, "enhanced_image.png"))
-            
-            # 후보들 정보
-            candidates_info = "\n".join([f"  {i}: {cand}" for i, cand in enumerate(candidates)])
             
             # 로그 파일 작성
             log_content = f"""=== QWEN GRPO Episode Results ===
@@ -250,10 +222,8 @@ Episode: {self.episode_count}
 Original Prompt: {self.current_user_prompt}
 Enhanced Prompt: {self.current_enhanced_prompt}
 
-=== GRPO Action ===
-Selected Action: {action}
-Available Candidates ({len(candidates)}):
-{candidates_info}
+=== GRPO Direct Generation ===
+Generated Enhanced Prompt: {enhanced_prompt}
 
 === Reward Components ===
 Original Reward (Original→Original): {original_reward:.4f}
@@ -278,7 +248,7 @@ Enhanced Image: enhanced_image.png
         except Exception as e:
             logger.warning(f"Failed to save episode results: {e}")
     
-    def _save_error_log(self, action: int, candidates: List[str], error_msg: str):
+    def _save_error_log(self, enhanced_prompt: str, error_msg: str):
         """에러 발생 시 로그만 저장"""
         try:
             # 에러 로그 파일 작성
@@ -289,10 +259,7 @@ Episode: {self.episode_count}
 === Error Info ===
 Error Message: {error_msg}
 Original Prompt: {self.current_user_prompt}
-Selected Action: {action}
-
-=== Available Candidates ===
-{chr(10).join([f"  {i}: {cand}" for i, cand in enumerate(candidates)])}
+Enhanced Prompt: {enhanced_prompt}
 
 === Note ===
 Images could not be generated/saved due to the error above.
@@ -318,7 +285,7 @@ class QWENGRPOTrainer:
         self.sd_pipeline = sd_pipeline
         
         # QWEN 모델에 GRPO 컴포넌트가 설정되어 있는지 확인
-        if not hasattr(qwen_model, 'grpo_policy_head'):
+        if not hasattr(qwen_model, 'ref_model'):
             raise ValueError("QWEN 모델에 GRPO 컴포넌트가 설정되지 않았습니다. grpo_config를 전달하여 초기화하세요.")
         
         self.env = QWENGRPOEnvironment(qwen_model, reward_model, sd_pipeline, config)
@@ -337,7 +304,7 @@ class QWENGRPOTrainer:
         plt.ion()  # Interactive mode on
         
         logger.info("🎯 QWEN GRPO 트레이너 초기화 완료")
-        logger.info(f"✅ Action Space: {config.num_enhancement_candidates} enhancement candidates")
+        logger.info(f"✅ QWEN 직접 학습 방식으로 설정")
         logger.info(f"📊 플롯 저장 디렉토리: {self.plot_save_dir}")
     
     def collect_rollouts(self, prompts: List[str], is_baseline: bool = False) -> List[Dict]:
@@ -361,14 +328,14 @@ class QWENGRPOTrainer:
                     
                     state = self.env.reset(user_prompt)
                     
-                    # QWEN GRPO로 액션 선택
+                    # QWEN GRPO로 향상된 프롬프트 생성
                     with torch.cuda.device(0):
-                        action, log_prob, candidates = self.qwen_model.get_grpo_action_and_log_prob(user_prompt)
+                        enhanced_prompt, log_prob = self.qwen_model.generate_grpo_enhanced_prompt(user_prompt)
                     
-                    logger.info(f"    🎯 선택된 액션: {action} (로그 확률: {log_prob:.4f})")
+                    logger.info(f"    🎯 생성된 프롬프트: '{enhanced_prompt[:50]}...' (로그 확률: {log_prob:.4f})")
                     
                     # 환경 스텝 실행
-                    next_state, reward, done, info = self.env.step(action)
+                    next_state, reward, done, info = self.env.step(enhanced_prompt)
                     
                     # 베이스라인일 때는 설정 복원
                     if is_baseline:
@@ -378,10 +345,9 @@ class QWENGRPOTrainer:
                         # 경험 저장
                         experience = {
                             'user_prompt': user_prompt,
-                            'action': action,
+                            'enhanced_prompt': enhanced_prompt,
                             'log_prob': log_prob,
                             'reward': reward,
-                            'candidates': candidates,
                             'info': info,
                             'is_baseline': is_baseline
                         }
@@ -440,7 +406,6 @@ class QWENGRPOTrainer:
         logger.info(f"✅ GRPO 업데이트 완료")
         logger.info(f"  Policy Loss: {metrics.get('policy_loss', 0):.4f}")
         logger.info(f"  KL Div: {metrics.get('kl_div', 0):.4f}")
-        logger.info(f"  Entropy: {metrics.get('entropy', 0):.4f}")
         logger.info(f"  Mean Reward: {metrics.get('mean_reward', 0):.4f}")
         
         return metrics
@@ -540,13 +505,12 @@ class QWENGRPOTrainer:
                     # 기본 향상
                     basic_result = self.qwen_model.enhance_prompt(prompt)
                     
-                    # GRPO 기반 선택
-                    action, log_prob, candidates = self.qwen_model.get_grpo_action_and_log_prob(prompt)
-                    grpo_enhanced = candidates[action] if 0 <= action < len(candidates) else candidates[0]
+                    # GRPO 기반 생성
+                    grpo_enhanced, _ = self.qwen_model.generate_grpo_enhanced_prompt(prompt)
                 
                 logger.info(f"  원본: '{prompt}'")
                 logger.info(f"  기본: '{basic_result['enhanced_prompt'][:60]}...'")
-                logger.info(f"  GRPO: '{grpo_enhanced[:60]}...' (액션: {action})")
+                logger.info(f"  GRPO: '{grpo_enhanced[:60]}...'")
                 
             except Exception as e:
                 logger.warning(f"  샘플 출력 실패: {e}")

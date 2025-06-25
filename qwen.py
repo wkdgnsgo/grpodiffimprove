@@ -104,59 +104,32 @@ class QWENModel:
         Enhanced version:"""
 
     def _setup_grpo_components(self):
-        """GRPO 관련 컴포넌트 설정"""
+        """GRPO 관련 컴포넌트 설정 - QWEN 직접 학습"""
         self.hidden_size = self.model.config.hidden_size
         self.vocab_size = len(self.tokenizer.get_vocab())
         
-        # GRPO 정책 헤드 (기존 모델 위에 추가)
-        self.grpo_policy_head = nn.Sequential(
-            nn.Linear(self.hidden_size, 2048),
-            nn.LayerNorm(2048),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(2048, 1024),
-            nn.LayerNorm(1024),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(1024, self.grpo_config.num_enhancement_candidates)  # 후보 개수만큼
-        ).to(self.device).half()
+        # 참조 모델 (frozen copy of QWEN for KL penalty)
+        from copy import deepcopy
+        self.ref_model = deepcopy(self.model)
+        self.ref_model.eval()
         
-        # 가중치 초기화
-        self._init_grpo_weights()
+        # 참조 모델의 모든 파라미터를 freeze
+        for param in self.ref_model.parameters():
+            param.requires_grad = False
         
-        # 참조 정책 (frozen copy)
-        self.ref_policy_head = nn.Sequential(
-            nn.Linear(self.hidden_size, 2048),
-            nn.LayerNorm(2048),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(2048, 1024),
-            nn.LayerNorm(1024),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(1024, self.grpo_config.num_enhancement_candidates)
-        ).to(self.device).half()
-        
-        self.ref_policy_head.load_state_dict(self.grpo_policy_head.state_dict())
-        self.ref_policy_head.eval()
-        
-        # 옵티마이저 (GRPO 헤드만 학습)
+        # 옵티마이저 (QWEN 모델만 학습)
         self.grpo_optimizer = torch.optim.AdamW(
-            self.grpo_policy_head.parameters(), 
-            lr=self.grpo_config.learning_rate, 
+            self.model.parameters(), 
+            lr=self.grpo_config.learning_rate,
             weight_decay=0.01
         )
         
         logger.info("✅ GRPO 컴포넌트 초기화 완료")
-        logger.info(f"📊 Action Space: {self.grpo_config.num_enhancement_candidates} enhancement candidates")
+        logger.info(f"📊 QWEN 모델 직접 학습 방식으로 설정")
 
     def _init_grpo_weights(self):
-        """GRPO 가중치 초기화"""
-        for layer in self.grpo_policy_head:
-            if isinstance(layer, nn.Linear):
-                gain = 0.02 if layer.out_features == self.grpo_config.num_enhancement_candidates else 0.1
-                nn.init.xavier_normal_(layer.weight, gain=gain)
-                nn.init.constant_(layer.bias, 0.0)
+        """GRPO 가중치 초기화 (QWEN 직접 학습 방식에서는 불필요)"""
+        pass
 
     def enhance_prompt(self, user_prompt):
         """기본 프롬프트 향상 (GRPO 없이)"""
@@ -291,7 +264,7 @@ class QWENModel:
         return candidates[:num_candidates]
 
     def get_grpo_state_representation(self, user_prompt: str) -> torch.Tensor:
-        """GRPO를 위한 상태 표현 생성"""
+        """GRPO를 위한 상태 표현 생성 (QWEN 모델도 학습 가능)"""
         # VLM에 입력할 메시지 구성
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -313,20 +286,19 @@ class QWENModel:
             truncation=True
         ).to(self.device)
         
-        # 히든 스테이트 추출
-        with torch.no_grad():
-            outputs = self.model(
-                input_ids=inputs['input_ids'],
-                attention_mask=inputs['attention_mask'],
-                output_hidden_states=True
-            )
-            
-            if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
-                hidden_states = outputs.last_hidden_state
-            elif hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
-                hidden_states = outputs.hidden_states[-1]
-            else:
-                raise AttributeError("Cannot find hidden states in model output")
+        # 히든 스테이트 추출 (QWEN 모델도 학습되도록 gradient 계산)
+        outputs = self.model(
+            input_ids=inputs['input_ids'],
+            attention_mask=inputs['attention_mask'],
+            output_hidden_states=True
+        )
+        
+        if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
+            hidden_states = outputs.last_hidden_state
+        elif hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
+            hidden_states = outputs.hidden_states[-1]
+        else:
+            raise AttributeError("Cannot find hidden states in model output")
         
         # 마지막 토큰의 히든 스테이트 사용
         if inputs['attention_mask'] is not None:
@@ -338,91 +310,145 @@ class QWENModel:
         
         return state_repr.squeeze(0)  # [hidden_size]
 
-    def get_grpo_action_and_log_prob(self, user_prompt: str) -> Tuple[int, torch.Tensor, List[str]]:
-        """GRPO 액션 선택 및 로그 확률 계산"""
-        # 상태 표현 생성
-        state_repr = self.get_grpo_state_representation(user_prompt)
+    def generate_grpo_enhanced_prompt(self, user_prompt: str) -> Tuple[str, torch.Tensor]:
+        """GRPO를 통해 향상된 프롬프트 생성 (QWEN 직접 학습)"""
+        # VLM에 입력할 메시지 구성
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.user_template.format(user_prompt=user_prompt)}
+        ]
         
-        # 후보 프롬프트들 생성 (semantic filtering 제거)
-        candidates = self.generate_enhancement_candidates(
-            user_prompt, 
-            use_semantic_filtering=False,  # GRPO가 직접 학습하도록
-            semantic_threshold=self.grpo_config.semantic_threshold
+        # 템플릿 적용
+        prompt = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
         )
         
-        # 정책 로짓 계산
-        policy_logits = self.grpo_policy_head(state_repr.half())
+        # 토크나이징
+        inputs = self.tokenizer(
+            prompt, 
+            return_tensors="pt", 
+            padding=True, 
+            truncation=True
+        ).to(self.device)
         
-        # 온도 스케일링
-        scaled_logits = policy_logits / self.grpo_config.temperature
-        scaled_logits = torch.clamp(scaled_logits, min=-10, max=10)
+        # QWEN 모델로 직접 생성 (gradient 계산)
+        outputs = self.model.generate(
+            **inputs,
+            generation_config=self.generation_config,
+            pad_token_id=self.tokenizer.pad_token_id,
+            return_dict_in_generate=True,
+            output_scores=True
+        )
         
-        # 확률 분포 생성
-        action_probs = F.softmax(scaled_logits, dim=-1)
+        # 생성된 텍스트 디코딩
+        generated_text = self.tokenizer.decode(
+            outputs.sequences[0][inputs['input_ids'].shape[1]:], 
+            skip_special_tokens=True
+        ).strip()
         
-        # 액션 샘플링
-        try:
-            action_dist = torch.distributions.Categorical(action_probs)
-            action = action_dist.sample()
-            action_log_prob = action_dist.log_prob(action)
-        except ValueError:
-            logger.warning("Invalid probability distribution, using uniform sampling")
-            action = torch.randint(0, len(candidates), (1,)).to(self.device)
-            action_log_prob = torch.log(torch.tensor(1.0 / len(candidates), device=self.device))
+        # 후처리
+        enhanced_prompt = self._post_process_output(generated_text)
         
-        return action.item(), action_log_prob, candidates
+        # 로그 확률 계산 (생성된 토큰들의 평균 로그 확률)
+        if hasattr(outputs, 'scores') and outputs.scores:
+            log_probs = []
+            for i, score in enumerate(outputs.scores):
+                token_id = outputs.sequences[0][inputs['input_ids'].shape[1] + i]
+                log_prob = F.log_softmax(score, dim=-1)[0, token_id]
+                log_probs.append(log_prob)
+            
+            avg_log_prob = torch.stack(log_probs).mean()
+        else:
+            # fallback: 더미 로그 확률
+            avg_log_prob = torch.tensor(0.0, device=self.device)
+        
+        return enhanced_prompt, avg_log_prob
 
-    def get_ref_policy_log_prob(self, user_prompt: str, action: int) -> torch.Tensor:
-        """참조 정책의 로그 확률 계산"""
-        state_repr = self.get_grpo_state_representation(user_prompt)
+    def get_ref_model_log_prob(self, user_prompt: str, enhanced_prompt: str) -> torch.Tensor:
+        """참조 모델의 로그 확률 계산"""
+        # VLM에 입력할 메시지 구성
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.user_template.format(user_prompt=user_prompt)}
+        ]
         
+        # 템플릿 적용
+        prompt = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
+        
+        # 전체 시퀀스 (프롬프트 + 생성된 텍스트)
+        full_text = prompt + enhanced_prompt
+        
+        # 토크나이징
+        inputs = self.tokenizer(
+            full_text, 
+            return_tensors="pt", 
+            padding=True, 
+            truncation=True
+        ).to(self.device)
+        
+        # 참조 모델로 로그 확률 계산
         with torch.no_grad():
-            ref_logits = self.ref_policy_head(state_repr.half())
-            scaled_logits = ref_logits / self.grpo_config.temperature
-            ref_probs = F.softmax(scaled_logits, dim=-1)
-            ref_log_prob = torch.log(ref_probs[action] + 1e-8)
-        
-        return ref_log_prob
+            outputs = self.ref_model(
+                input_ids=inputs['input_ids'],
+                attention_mask=inputs['attention_mask']
+            )
+            
+            # 생성된 부분의 로그 확률만 계산
+            prompt_length = len(self.tokenizer.encode(prompt))
+            generated_logits = outputs.logits[0, prompt_length-1:-1]  # 생성된 부분만
+            generated_tokens = inputs['input_ids'][0, prompt_length:]
+            
+            log_probs = F.log_softmax(generated_logits, dim=-1)
+            token_log_probs = log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
+            
+            return token_log_probs.mean()
 
     def update_grpo_policy(self, experiences: List[Dict]) -> Dict:
-        """GRPO 정책 업데이트"""
+        """GRPO 정책 업데이트 (QWEN 직접 학습)"""
         if not experiences:
             return {}
         
         # 경험 데이터 준비
-        states = []
-        actions = []
-        log_probs = []
+        user_prompts = []
+        enhanced_prompts = []
+        old_log_probs = []
         rewards = []
         
         for exp in experiences:
-            states.append(self.get_grpo_state_representation(exp['user_prompt']))
-            actions.append(exp['action'])
-            log_probs.append(exp['log_prob'])
+            user_prompts.append(exp['user_prompt'])
+            enhanced_prompts.append(exp['enhanced_prompt'])
+            old_log_probs.append(exp['log_prob'])
             rewards.append(exp['reward'])
         
         # 텐서로 변환
-        states = torch.stack(states).half()
-        actions = torch.tensor(actions, device=self.device)
-        old_log_probs = torch.stack(log_probs).half()
+        old_log_probs = torch.stack(old_log_probs).half()
         rewards = torch.tensor(rewards, device=self.device, dtype=torch.float16)
         
         # 그룹 평균을 baseline으로 사용 (GRPO 방식)
         baseline = rewards.mean()
         advantages = rewards - baseline
         
-        # 현재 정책의 로그 확률 계산
-        current_logits = self.grpo_policy_head(states)
-        scaled_logits = current_logits / self.grpo_config.temperature
-        current_probs = F.softmax(scaled_logits, dim=-1)
-        current_log_probs = torch.log(current_probs.gather(1, actions.unsqueeze(1)).squeeze(1) + 1e-8)
+        # 현재 모델과 참조 모델의 로그 확률 계산
+        current_log_probs = []
+        ref_log_probs = []
         
-        # 참조 정책의 로그 확률 계산
-        with torch.no_grad():
-            ref_logits = self.ref_policy_head(states)
-            ref_scaled_logits = ref_logits / self.grpo_config.temperature
-            ref_probs = F.softmax(ref_scaled_logits, dim=-1)
-            ref_log_probs = torch.log(ref_probs.gather(1, actions.unsqueeze(1)).squeeze(1) + 1e-8)
+        for user_prompt, enhanced_prompt in zip(user_prompts, enhanced_prompts):
+            # 현재 모델의 로그 확률 (gradient 계산)
+            _, current_log_prob = self.generate_grpo_enhanced_prompt(user_prompt)
+            current_log_probs.append(current_log_prob)
+            
+            # 참조 모델의 로그 확률
+            ref_log_prob = self.get_ref_model_log_prob(user_prompt, enhanced_prompt)
+            ref_log_probs.append(ref_log_prob)
+        
+        current_log_probs = torch.stack(current_log_probs).half()
+        ref_log_probs = torch.stack(ref_log_probs).half()
         
         # 중요도 비율 계산
         ratio = torch.exp(current_log_probs - old_log_probs)
@@ -435,24 +461,19 @@ class QWENModel:
         kl_div = (current_log_probs - ref_log_probs).mean()
         kl_penalty = self.grpo_config.kl_coef * kl_div
         
-        # 엔트로피 보너스
-        entropy = -(current_probs * torch.log(current_probs + 1e-8)).sum(dim=-1).mean()
-        entropy_bonus = self.grpo_config.entropy_coef * entropy
-        
-        # 총 손실
-        total_loss = policy_loss + kl_penalty - entropy_bonus
+        # 총 손실 (엔트로피는 QWEN 자체에서 제공)
+        total_loss = policy_loss + kl_penalty
         
         # 역전파
         self.grpo_optimizer.zero_grad()
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.grpo_policy_head.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.grpo_optimizer.step()
         
         # 메트릭 반환
         return {
             'policy_loss': policy_loss.item(),
             'kl_div': kl_div.item(),
-            'entropy': entropy.item(),
             'total_loss': total_loss.item(),
             'mean_reward': rewards.mean().item(),
             'baseline': baseline.item(),
