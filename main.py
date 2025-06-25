@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 """
-순수 GRPO VLM 학습 메인 스크립트
-GPU 환경에서 실제 QWEN VL, Stable Diffusion 3, CLIP 모델을 사용한 학습
+QWEN 통합 GRPO VLM 학습 메인 스크립트
+QWEN 모델의 enhance_prompt 기능과 GRPO를 통합한 프롬프트 개선 시스템
 """
 
-import os
 import sys
 import logging
 import torch
 from pathlib import Path
-
-# 현재 디렉토리를 Python path에 추가
-sys.path.insert(0, str(Path(__file__).parent))
-
-from trainer_grpo_pure import PureGRPOConfig, PureGRPOTrainer
-from qwen import QWENModel
-from clip_reward import CLIPReward
 
 # 로깅 설정
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('grpo_training.log'),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('qwen_grpo_training.log')
     ]
 )
+
 logger = logging.getLogger(__name__)
+
+# 모델 임포트
+from qwen import QWENModel, QWENGRPOConfig
+from clip_reward import CLIPReward
+from trainer_grpo_pure import QWENGRPOTrainer
 
 def load_stable_diffusion_pipeline(device="cuda:1"):
     """Stable Diffusion 3 파이프라인 로드 (GPU 1번)"""
@@ -91,7 +89,7 @@ def get_training_prompts():
 
 def main():
     """메인 학습 함수"""
-    logger.info("🚀 순수 GRPO VLM 학습 시작")
+    logger.info("🚀 QWEN 통합 GRPO VLM 학습 시작")
     logger.info("=" * 80)
     
     # GPU 확인 및 배치 계획
@@ -101,40 +99,48 @@ def main():
             logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
         
         logger.info("\n🎯 GPU 배치 계획:")
-        logger.info("  GPU 0: QWEN VL 모델 (프롬프트 향상)")
+        logger.info("  GPU 0: QWEN VL 모델 + GRPO 정책 (프롬프트 향상 및 학습)")
         logger.info("  GPU 1: Stable Diffusion 3 (이미지 생성)")
         logger.info("  GPU 2: CLIP 리워드 모델 (리워드 계산)")
     else:
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
-    # 설정
-    config = PureGRPOConfig(
+    # QWEN GRPO 설정
+    config = QWENGRPOConfig(
         learning_rate=1e-6,
         batch_size=4,
-        num_rollouts=5,
+        num_rollouts=3,  # 롤아웃 수 줄임 (각 프롬프트당 3개 후보)
         max_prompt_length=77,
-        max_new_tokens=20,
+        max_new_tokens=30,
         temperature=1.2,
         top_p=0.9,
         top_k=100,
         kl_coef=0.02,
         clip_ratio=0.2,
-        entropy_coef=0.01
+        entropy_coef=0.01,
+        num_enhancement_candidates=5,  # 5개 후보 중 선택
+        save_images=True,
+        log_dir="qwen_grpo_results"
     )
     
-    logger.info("📋 학습 설정:")
+    logger.info("📋 QWEN GRPO 설정:")
     logger.info(f"  - 학습률: {config.learning_rate}")
     logger.info(f"  - 배치 크기: {config.batch_size}")
     logger.info(f"  - 롤아웃 수: {config.num_rollouts}")
-    logger.info(f"  - 최대 토큰: {config.max_new_tokens}")
+    logger.info(f"  - 후보 개수: {config.num_enhancement_candidates}")
     logger.info(f"  - 온도: {config.temperature}")
     logger.info(f"  - KL 계수: {config.kl_coef}")
     
     try:
-        # 1. QWEN VL 모델 로드 (GPU 0번)
-        logger.info("\n🧠 QWEN VL 모델 로딩...")
-        qwen_model = QWENModel(device="cuda:0")
-        logger.info("✅ QWEN VL 모델 로드 완료 (GPU 0)")
+        # 1. QWEN VL 모델 로드 (GRPO 통합) (GPU 0번)
+        logger.info("\n🧠 QWEN VL 모델 + GRPO 로딩...")
+        qwen_model = QWENModel(
+            model_name="Qwen/Qwen2-VL-7B-Instruct",
+            device="cuda:0",
+            temperature=0.7,
+            grpo_config=config  # GRPO 컴포넌트 활성화
+        )
+        logger.info("✅ QWEN VL + GRPO 모델 로드 완료 (GPU 0)")
         
         # 2. CLIP 리워드 모델 로드 (GPU 2번)
         logger.info("\n🎯 CLIP 리워드 모델 로딩...")
@@ -146,9 +152,9 @@ def main():
         sd_pipeline = load_stable_diffusion_pipeline(device="cuda:1")
         logger.info("✅ SD3 파이프라인 로드 완료 (GPU 1)")
         
-        # 4. 순수 GRPO 트레이너 초기화
-        logger.info("\n🎯 순수 GRPO 트레이너 초기화...")
-        trainer = PureGRPOTrainer(qwen_model, reward_model, sd_pipeline, config)
+        # 4. QWEN GRPO 트레이너 초기화
+        logger.info("\n🎯 QWEN GRPO 트레이너 초기화...")
+        trainer = QWENGRPOTrainer(qwen_model, reward_model, sd_pipeline, config)
         logger.info("✅ 트레이너 초기화 완료")
         
         # 5. 학습 데이터 준비
@@ -159,57 +165,103 @@ def main():
         if len(train_prompts) > 5:
             logger.info(f"  ... 총 {len(train_prompts)}개")
         
-        # 6. 베이스라인 성능 측정
-        logger.info("\n📊 베이스라인 성능 측정...")
+        # 6. 베이스라인 성능 측정 (기본 QWEN enhance_prompt)
+        logger.info("\n📊 베이스라인 성능 측정 (기본 QWEN)...")
         baseline_rewards = []
         
         for i, prompt in enumerate(train_prompts[:3]):  # 처음 3개로 베이스라인 측정
             logger.info(f"  테스트 {i+1}/3: '{prompt}'")
             
-            state = trainer.env.reset(prompt)
-            original_prompt = trainer.env.current_prompt
-            
-            # 몇 스텝 실행
-            for _ in range(config.max_new_tokens):
-                action, _, _ = trainer.policy.get_action_and_log_prob(state)
-                state, reward, done, info = trainer.env.step(action)
-                if done:
-                    baseline_rewards.append(reward)
-                    enhanced_prompt = info['current_prompt']
-                    logger.info(f"    '{original_prompt}' -> '{enhanced_prompt}' (reward: {reward:.3f})")
-                    break
+            try:
+                # 기본 QWEN 향상
+                with torch.cuda.device(0):
+                    basic_result = qwen_model.enhance_prompt(prompt)
+                    enhanced_prompt = basic_result['enhanced_prompt']
+                
+                # 이미지 생성 및 리워드 계산
+                state = trainer.env.reset(prompt)
+                trainer.env.current_enhanced_prompt = enhanced_prompt
+                
+                # 이미지 생성
+                with torch.cuda.device(1):
+                    enhanced_result = sd_pipeline(
+                        prompt=enhanced_prompt,
+                        num_inference_steps=28,
+                        guidance_scale=7.0,
+                        height=1024,
+                        width=1024
+                    )
+                    enhanced_image = enhanced_result.images[0]
+                
+                # 리워드 계산
+                with torch.cuda.device(2):
+                    reward = reward_model.calculate_reward(
+                        prompt,
+                        enhanced_prompt,
+                        enhanced_image
+                    )
+                
+                baseline_rewards.append(reward)
+                logger.info(f"    '{prompt}' -> '{enhanced_prompt[:50]}...' (reward: {reward:.3f})")
+                
+            except Exception as e:
+                logger.warning(f"    베이스라인 측정 실패: {e}")
+                continue
         
         avg_baseline = sum(baseline_rewards) / len(baseline_rewards) if baseline_rewards else 0.0
         logger.info(f"📈 베이스라인 평균 리워드: {avg_baseline:.3f}")
         
-        # 7. GRPO 학습 실행
-        logger.info("\n🚀 순수 GRPO 학습 시작...")
+        # 7. QWEN GRPO 학습 실행
+        logger.info("\n🚀 QWEN GRPO 학습 시작...")
         logger.info("=" * 80)
         
-        num_epochs = 10
-        trainer.train(train_prompts, num_epochs=num_epochs)
+        num_epochs = 8
+        all_metrics = trainer.train(train_prompts, num_epochs=num_epochs)
         
         logger.info("✅ 학습 완료!")
         
-        # 8. 학습 후 성능 측정
-        logger.info("\n📊 학습 후 성능 측정...")
+        # 8. 학습 후 성능 측정 (GRPO 기반)
+        logger.info("\n📊 학습 후 성능 측정 (GRPO)...")
         trained_rewards = []
         
         for i, prompt in enumerate(train_prompts[:3]):  # 같은 프롬프트로 평가
             logger.info(f"  평가 {i+1}/3: '{prompt}'")
             
-            state = trainer.env.reset(prompt)
-            original_prompt = trainer.env.current_prompt
-            
-            # 몇 스텝 실행
-            for _ in range(config.max_new_tokens):
-                action, _, _ = trainer.policy.get_action_and_log_prob(state)
-                state, reward, done, info = trainer.env.step(action)
-                if done:
-                    trained_rewards.append(reward)
-                    enhanced_prompt = info['current_prompt']
-                    logger.info(f"    '{original_prompt}' -> '{enhanced_prompt}' (reward: {reward:.3f})")
-                    break
+            try:
+                # GRPO 기반 향상
+                with torch.cuda.device(0):
+                    action, log_prob, candidates = qwen_model.get_grpo_action_and_log_prob(prompt)
+                    grpo_enhanced = candidates[action] if 0 <= action < len(candidates) else candidates[0]
+                
+                # 이미지 생성 및 리워드 계산
+                state = trainer.env.reset(prompt)
+                trainer.env.current_enhanced_prompt = grpo_enhanced
+                
+                # 이미지 생성
+                with torch.cuda.device(1):
+                    enhanced_result = sd_pipeline(
+                        prompt=grpo_enhanced,
+                        num_inference_steps=28,
+                        guidance_scale=7.0,
+                        height=1024,
+                        width=1024
+                    )
+                    enhanced_image = enhanced_result.images[0]
+                
+                # 리워드 계산
+                with torch.cuda.device(2):
+                    reward = reward_model.calculate_reward(
+                        prompt,
+                        grpo_enhanced,
+                        enhanced_image
+                    )
+                
+                trained_rewards.append(reward)
+                logger.info(f"    '{prompt}' -> '{grpo_enhanced[:50]}...' (reward: {reward:.3f})")
+                
+            except Exception as e:
+                logger.warning(f"    학습 후 평가 실패: {e}")
+                continue
         
         avg_trained = sum(trained_rewards) / len(trained_rewards) if trained_rewards else 0.0
         logger.info(f"📈 학습 후 평균 리워드: {avg_trained:.3f}")
@@ -217,34 +269,37 @@ def main():
         # 9. 결과 분석 및 저장
         logger.info("\n📋 최종 결과:")
         logger.info("=" * 80)
-        logger.info(f"🎯 순수 GRPO 학습 결과 (Value Network 없음)")
-        logger.info(f"📊 베이스라인 리워드: {avg_baseline:.3f}")
-        logger.info(f"📈 학습 후 리워드: {avg_trained:.3f}")
+        logger.info(f"🎯 QWEN GRPO 학습 결과")
+        logger.info(f"📊 베이스라인 리워드 (기본 QWEN): {avg_baseline:.3f}")
+        logger.info(f"📈 학습 후 리워드 (GRPO): {avg_trained:.3f}")
         logger.info(f"🔄 개선도: {avg_trained - avg_baseline:.3f}")
-        logger.info(f"📈 개선률: {((avg_trained - avg_baseline) / avg_baseline * 100):.1f}%")
+        
+        if avg_baseline > 0:
+            logger.info(f"📈 개선률: {((avg_trained - avg_baseline) / avg_baseline * 100):.1f}%")
         
         if avg_trained > avg_baseline:
-            logger.info("✅ 학습이 성공적으로 개선되었습니다!")
+            logger.info("✅ GRPO 학습이 성공적으로 개선되었습니다!")
         else:
-            logger.info("⚠️ 학습 개선이 미미합니다. 하이퍼파라미터 조정이 필요할 수 있습니다.")
+            logger.info("⚠️ GRPO 학습 개선이 미미합니다. 하이퍼파라미터 조정이 필요할 수 있습니다.")
         
         # 10. 모델 저장
         logger.info("\n💾 모델 저장...")
         save_dir = Path("checkpoints")
         save_dir.mkdir(exist_ok=True)
         
-        model_path = save_dir / "pure_grpo_policy.pth"
+        model_path = save_dir / "qwen_grpo_policy.pth"
         torch.save({
-            'policy_state_dict': trainer.policy.state_dict(),
+            'grpo_policy_state_dict': qwen_model.grpo_policy_head.state_dict(),
             'config': config,
             'baseline_reward': avg_baseline,
             'trained_reward': avg_trained,
-            'improvement': avg_trained - avg_baseline
+            'improvement': avg_trained - avg_baseline,
+            'training_metrics': all_metrics
         }, model_path)
         
         logger.info(f"✅ 모델 저장 완료: {model_path}")
         
-        logger.info("\n🎉 순수 GRPO 학습 완료!")
+        logger.info("\n🎉 QWEN GRPO 학습 완료!")
         
     except Exception as e:
         logger.error(f"❌ 학습 중 오류 발생: {e}")
