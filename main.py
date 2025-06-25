@@ -54,6 +54,9 @@ def load_stable_diffusion_pipeline(device="cuda:1"):
         pipe.enable_model_cpu_offload()
         pipe.enable_attention_slicing()
         
+        # 프로그레스 바 비활성화
+        pipe.set_progress_bar_config(disable=True)
+        
         logger.info("✅ Stable Diffusion 3 파이프라인 로드 완료")
         return pipe
         
