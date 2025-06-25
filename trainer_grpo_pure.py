@@ -15,6 +15,8 @@ from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 from dataclasses import dataclass
 import math
+import os
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,8 @@ class PureGRPOConfig:
     clip_ratio: float = 0.1
     entropy_coef: float = 0.02
     vocab_size: int = 32000
+    save_images: bool = True  # 이미지 저장 여부
+    log_dir: str = "grpo_results"  # 결과 저장 디렉토리
 
 
 
@@ -186,6 +190,13 @@ class PureGRPOPromptEnvironment:
         self.current_prompt = ""
         self.original_prompt = ""
         self.step_count = 0
+        self.episode_count = 0
+        
+        # 로깅 디렉토리 설정
+        if config.save_images:
+            self.base_log_dir = config.log_dir
+            os.makedirs(self.base_log_dir, exist_ok=True)
+            logger.info(f"결과 저장 디렉토리: {self.base_log_dir}")
         
         logger.info(f"순수 GRPO 환경 초기화 - Vocab: {self.vocab_size}")
         logger.info(f"GPU 배치: QWEN={self.qwen_device}, SD={self.sd_device}, Reward={self.reward_device}")
@@ -195,6 +206,21 @@ class PureGRPOPromptEnvironment:
         self.original_prompt = user_prompt
         self.current_prompt = user_prompt
         self.step_count = 0
+        self.episode_count += 1
+        
+        # 에피소드 폴더 생성
+        if self.config.save_images:
+            # 원본 프롬프트를 파일명에 안전한 형태로 변환
+            safe_prompt = "".join(c for c in user_prompt if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            safe_prompt = safe_prompt.replace(' ', '_')[:50]  # 최대 50자
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.episode_dir = os.path.join(
+                self.base_log_dir, 
+                f"episode_{self.episode_count:03d}_{timestamp}_{safe_prompt}"
+            )
+            os.makedirs(self.episode_dir, exist_ok=True)
+            logger.info(f"🎬 새 에피소드 폴더: {self.episode_dir}")
         
         # 현재 프롬프트를 토큰화하고 QWEN GPU(0번)로 이동
         tokens = self.tokenizer.encode(
@@ -241,30 +267,56 @@ class PureGRPOPromptEnvironment:
                     
                     # SD3 파이프라인을 GPU 1로 이동하여 이미지 생성
                     with torch.cuda.device(1):
-                        result = self.sd_pipeline(
+                        # 원본 프롬프트로 이미지 생성
+                        original_result = self.sd_pipeline(
+                            prompt=self.original_prompt,
+                            num_inference_steps=28,
+                            guidance_scale=7.0,
+                            height=1024,
+                            width=1024
+                        )
+                        original_image = original_result.images[0]
+                        
+                        # 향상된 프롬프트로 이미지 생성
+                        enhanced_result = self.sd_pipeline(
                             prompt=self.current_prompt,
                             num_inference_steps=28,
                             guidance_scale=7.0,
                             height=1024,
                             width=1024
                         )
-                        image = result.images[0]
+                        enhanced_image = enhanced_result.images[0]
                     
                     logger.info(f"🎯 리워드 계산 시작 (GPU {self.reward_device})")
                     
                     # CLIP 리워드를 GPU 2에서 계산
                     with torch.cuda.device(2):
-                        reward = self.reward_model.calculate_reward(
+                        # 각각의 리워드 계산 (aesthetic, semantic, clip 등)
+                        enhanced_reward = self.reward_model.calculate_reward(
                             self.original_prompt,
                             self.current_prompt,
-                            image
+                            enhanced_image
+                        )
+                        
+                        # 원본 프롬프트 vs 원본 이미지 (참고용)
+                        original_reward = self.reward_model.calculate_reward(
+                            self.original_prompt,
+                            self.original_prompt,
+                            original_image
                         )
                     
                     # 길이 보너스
                     length_bonus = min(self.step_count / self.config.max_new_tokens, 1.0) * 0.1
-                    total_reward = reward + length_bonus
+                    total_reward = enhanced_reward + length_bonus
                     
                     logger.info(f"✅ 리워드 계산 완료: {total_reward:.4f}")
+                    
+                    # 이미지 저장 및 로그 기록
+                    if self.config.save_images:
+                        self._save_episode_results(
+                            original_image, enhanced_image, 
+                            original_reward, enhanced_reward, length_bonus, total_reward
+                        )
                     
                 except Exception as e:
                     logger.warning(f"Reward calculation failed: {e}")
@@ -305,6 +357,50 @@ class PureGRPOPromptEnvironment:
         except Exception as e:
             logger.warning(f"Step failed: {e}")
             return None, 0.0, True, {'error': str(e)}
+    
+    def _save_episode_results(self, original_image, enhanced_image, original_reward, enhanced_reward, length_bonus, total_reward):
+        """에피소드 결과 저장 (이미지 + 로그)"""
+        try:
+            # 이미지 저장
+            original_image.save(os.path.join(self.episode_dir, "original_image.png"))
+            enhanced_image.save(os.path.join(self.episode_dir, "enhanced_image.png"))
+            
+            # 로그 파일 작성
+            log_content = f"""=== GRPO Episode Results ===
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Episode: {self.episode_count}
+
+=== Prompts ===
+Original Prompt: {self.original_prompt}
+Enhanced Prompt: {self.current_prompt}
+
+=== Prompt Changes ===
+Added Tokens: {self.step_count}
+Prompt Length Change: {len(self.original_prompt)} → {len(self.current_prompt)} characters
+
+=== Reward Components ===
+Original Reward (Original→Original): {original_reward:.4f}
+Enhanced Reward (Original→Enhanced): {enhanced_reward:.4f}
+Length Bonus: {length_bonus:.4f}
+Total Reward: {total_reward:.4f}
+
+=== Improvement ===
+Reward Improvement: {enhanced_reward - original_reward:.4f}
+Relative Improvement: {((enhanced_reward - original_reward) / max(original_reward, 0.001) * 100):.2f}%
+
+=== Files ===
+Original Image: original_image.png
+Enhanced Image: enhanced_image.png
+"""
+            
+            # 로그 파일 저장
+            with open(os.path.join(self.episode_dir, "episode_log.txt"), "w", encoding="utf-8") as f:
+                f.write(log_content)
+            
+            logger.info(f"💾 에피소드 결과 저장 완료: {self.episode_dir}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save episode results: {e}")
 
 class PureGRPOTrainer:
     """순수 GRPO 트레이너 (Value Network 없음)"""
