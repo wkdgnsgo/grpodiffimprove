@@ -52,7 +52,7 @@ class PureGRPOPolicy(nn.Module):
         logger.info(f"순수 GRPO 정책 - Hidden: {self.hidden_size}, Vocab: {self.vocab_size}")
         logger.info(f"GPU 배치: QWEN={self.qwen_device}, Policy={self.policy_device}")
         
-        # 오직 정책 헤드만! (Value Head 없음) - GPU 0에 배치
+        # 오직 정책 헤드만! (Value Head 없음) - GPU 0에 배치 (float16으로 통일)
         self.policy_head = nn.Sequential(
             nn.Linear(self.hidden_size, 2048),
             nn.LayerNorm(2048),
@@ -63,7 +63,7 @@ class PureGRPOPolicy(nn.Module):
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(1024, self.vocab_size)
-        ).to(self.policy_device)
+        ).to(self.policy_device).half()  # float16으로 변환
         
         self._init_weights()
         
@@ -110,8 +110,8 @@ class PureGRPOPolicy(nn.Module):
         else:
             last_hidden = hidden_states[:, -1, :]
         
-        # Hidden states를 Policy GPU로 이동 (GPU 0이므로 동일하지만 명시적으로)
-        last_hidden = last_hidden.to(self.policy_device)
+        # Hidden states를 Policy GPU로 이동하고 float16으로 변환
+        last_hidden = last_hidden.to(self.policy_device).half()
         
         # 오직 정책 로짓만 반환!
         policy_logits = self.policy_head(last_hidden)
@@ -154,14 +154,14 @@ class PureGRPOPolicy(nn.Module):
         try:
             token_dist = torch.distributions.Categorical(token_probs)
             action = token_dist.sample()
-            action_log_prob = token_dist.log_prob(action)
+            action_log_prob = token_dist.log_prob(action).half()  # float16으로 변환
         except ValueError:
             logger.warning("Invalid probability distribution, using uniform sampling")
             action = torch.randint(0, self.vocab_size, (1,))
-            action_log_prob = torch.log(torch.tensor(1.0 / self.vocab_size))
+            action_log_prob = torch.log(torch.tensor(1.0 / self.vocab_size, device=self.qwen_device)).half()  # float16으로 변환
         
-        # Value 없음! 오직 action, log_prob, logits만 반환
-        return action.item(), action_log_prob, scaled_logits.squeeze(0)
+        # Value 없음! 오직 action, log_prob, logits만 반환 (모두 float16)
+        return action.item(), action_log_prob, scaled_logits.squeeze(0).half()
 
 class PureGRPOPromptEnvironment:
     """순수 GRPO용 프롬프트 환경"""
@@ -311,10 +311,11 @@ class PureGRPOTrainer:
         # 오직 정책 네트워크만! (Value Network 없음)
         self.policy = PureGRPOPolicy(qwen_model, config)
         
-        # 참조 정책
+        # 참조 정책 (float16으로 통일)
         self.ref_policy = PureGRPOPolicy(qwen_model, config)
         self.ref_policy.load_state_dict(self.policy.state_dict())
         self.ref_policy.eval()
+        self.ref_policy.half()  # float16으로 변환
         
         # 오직 정책 파라미터만 학습
         trainable_params = list(self.policy.policy_head.parameters())
@@ -461,13 +462,13 @@ class PureGRPOTrainer:
             pad_length = max_length - input_ids_tensor.size(0)
             
             if pad_length > 0:
-                # 패딩 추가 (오른쪽에 패딩) - GPU 0에서
+                # 패딩 추가 (오른쪽에 패딩) - GPU 0에서, dtype 보존
                 padded_input = torch.cat([
-                    input_ids_tensor,
+                    input_ids_tensor.to("cuda:0"),
                     torch.zeros(pad_length, dtype=input_ids_tensor.dtype, device="cuda:0")
                 ])
                 padded_mask = torch.cat([
-                    attention_mask_tensor,
+                    attention_mask_tensor.to("cuda:0"),
                     torch.zeros(pad_length, dtype=attention_mask_tensor.dtype, device="cuda:0")
                 ])
             else:
@@ -477,13 +478,13 @@ class PureGRPOTrainer:
             padded_input_ids.append(padded_input)
             padded_attention_masks.append(padded_mask)
         
-        # 모든 텐서를 GPU 0으로 이동
-        input_ids = torch.stack(padded_input_ids).to("cuda:0")
-        attention_masks = torch.stack(padded_attention_masks).to("cuda:0")
-        actions = torch.tensor(actions).to("cuda:0")
-        old_log_probs = torch.stack(old_log_probs).to("cuda:0")
-        ref_log_probs = torch.stack(ref_log_probs).to("cuda:0")
-        advantages = torch.tensor(advantages, dtype=torch.float32).to("cuda:0")
+        # 모든 텐서를 GPU 0으로 이동하고 적절한 dtype 설정
+        input_ids = torch.stack(padded_input_ids).to("cuda:0")  # int 타입 유지
+        attention_masks = torch.stack(padded_attention_masks).to("cuda:0")  # int 타입 유지
+        actions = torch.tensor(actions).to("cuda:0")  # int 타입 유지
+        old_log_probs = torch.stack(old_log_probs).to("cuda:0").half()  # float16
+        ref_log_probs = torch.stack(ref_log_probs).to("cuda:0").half()  # float16
+        advantages = torch.tensor(advantages, dtype=torch.float16).to("cuda:0")  # float16
         
         # 오직 정책 로짓만 계산! (Values 없음)
         policy_logits = self.policy(input_ids, attention_masks)
