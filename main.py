@@ -258,8 +258,11 @@ def main():
         logger.info("\n🚀 QWEN GRPO 학습 시작...")
         logger.info("=" * 80)
         
-        num_epochs = 50
-        all_metrics = trainer.train(train_prompts, num_epochs=num_epochs)
+        all_metrics, baseline_data = trainer.train(
+            train_prompts=train_prompts, 
+            num_epochs=10, 
+            num_baseline_episodes=3  # 베이스라인 에피소드 수 조정 가능
+        )
         
         logger.info("✅ 학습 완료!")
         
