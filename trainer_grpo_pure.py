@@ -42,12 +42,17 @@ class PureGRPOPolicy(nn.Module):
         self.qwen_model = qwen_model
         self.config = config
         
+        # GPU 디바이스 설정
+        self.qwen_device = "cuda:0"  # QWEN은 GPU 0
+        self.policy_device = "cuda:0"  # Policy head도 GPU 0에서 학습
+        
         self.hidden_size = qwen_model.model.config.hidden_size
         self.vocab_size = len(qwen_model.tokenizer.get_vocab())
         
         logger.info(f"순수 GRPO 정책 - Hidden: {self.hidden_size}, Vocab: {self.vocab_size}")
+        logger.info(f"GPU 배치: QWEN={self.qwen_device}, Policy={self.policy_device}")
         
-        # 오직 정책 헤드만! (Value Head 없음)
+        # 오직 정책 헤드만! (Value Head 없음) - GPU 0에 배치
         self.policy_head = nn.Sequential(
             nn.Linear(self.hidden_size, 2048),
             nn.LayerNorm(2048),
@@ -58,7 +63,7 @@ class PureGRPOPolicy(nn.Module):
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(1024, self.vocab_size)
-        )
+        ).to(self.policy_device)
         
         self._init_weights()
         
@@ -77,6 +82,11 @@ class PureGRPOPolicy(nn.Module):
         """오직 정책 로짓만 반환 (Values 없음)"""
         batch_size = input_ids.size(0)
         
+        # 입력 텐서를 QWEN GPU(0번)로 이동
+        input_ids = input_ids.to(self.qwen_device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.qwen_device)
+        
         with torch.no_grad():
             outputs = self.qwen_model.model(
                 input_ids=input_ids,
@@ -88,9 +98,12 @@ class PureGRPOPolicy(nn.Module):
         if attention_mask is not None:
             last_valid_indices = attention_mask.sum(dim=1) - 1
             last_valid_indices = torch.clamp(last_valid_indices, min=0)
-            last_hidden = hidden_states[torch.arange(batch_size), last_valid_indices]
+            last_hidden = hidden_states[torch.arange(batch_size, device=self.qwen_device), last_valid_indices]
         else:
             last_hidden = hidden_states[:, -1, :]
+        
+        # Hidden states를 Policy GPU로 이동 (GPU 0이므로 동일하지만 명시적으로)
+        last_hidden = last_hidden.to(self.policy_device)
         
         # 오직 정책 로짓만 반환!
         policy_logits = self.policy_head(last_hidden)
@@ -153,19 +166,25 @@ class PureGRPOPromptEnvironment:
         self.tokenizer = qwen_model.tokenizer
         self.vocab_size = len(self.tokenizer.get_vocab())
         
+        # GPU 디바이스 설정
+        self.qwen_device = "cuda:0"  # QWEN (토큰화)
+        self.sd_device = "cuda:1"    # Stable Diffusion (이미지 생성)
+        self.reward_device = "cuda:2"  # CLIP Reward (리워드 계산)
+        
         self.current_prompt = ""
         self.original_prompt = ""
         self.step_count = 0
         
         logger.info(f"순수 GRPO 환경 초기화 - Vocab: {self.vocab_size}")
+        logger.info(f"GPU 배치: QWEN={self.qwen_device}, SD={self.sd_device}, Reward={self.reward_device}")
     
     def reset(self, user_prompt: str):
-        """환경 리셋"""
+        """환경 리셋 - GPU 0으로 토큰 이동"""
         self.original_prompt = user_prompt
         self.current_prompt = user_prompt
         self.step_count = 0
         
-        # 현재 프롬프트를 토큰화
+        # 현재 프롬프트를 토큰화하고 QWEN GPU(0번)로 이동
         tokens = self.tokenizer.encode(
             self.current_prompt,
             return_tensors="pt",
@@ -177,12 +196,12 @@ class PureGRPOPromptEnvironment:
         attention_mask = torch.ones_like(tokens)
         
         return {
-            'input_ids': tokens.squeeze(0),
-            'attention_mask': attention_mask.squeeze(0)
+            'input_ids': tokens.squeeze(0).to(self.qwen_device),
+            'attention_mask': attention_mask.squeeze(0).to(self.qwen_device)
         }
     
     def step(self, action: int):
-        """환경 스텝"""
+        """환경 스텝 - GPU 간 데이터 이동 처리"""
         # 액션(토큰)을 텍스트로 변환
         try:
             token_text = self.tokenizer.decode([action], skip_special_tokens=True)
@@ -201,29 +220,37 @@ class PureGRPOPromptEnvironment:
                    action == self.tokenizer.eos_token_id or
                    len(self.current_prompt) >= self.config.max_prompt_length * 4)
             
-            # 리워드 계산 (에피소드 끝에만)
+            # 리워드 계산 (에피소드 끝에만) - GPU 간 이동 처리
             if done:
                 try:
-                    # 이미지 생성
-                    result = self.sd_pipeline(
-                        prompt=self.current_prompt,
-                        num_inference_steps=20,
-                        guidance_scale=7.0,
-                        height=512,
-                        width=512
-                    )
-                    image = result.images[0]
+                    logger.info(f"🖼️  이미지 생성 시작 (GPU {self.sd_device})")
                     
-                    # CLIP 리워드 계산
-                    reward = self.reward_model.calculate_reward(
-                        self.original_prompt,
-                        self.current_prompt,
-                        image
-                    )
+                    # SD3 파이프라인을 GPU 1로 이동하여 이미지 생성
+                    with torch.cuda.device(1):
+                        result = self.sd_pipeline(
+                            prompt=self.current_prompt,
+                            num_inference_steps=20,
+                            guidance_scale=7.0,
+                            height=512,
+                            width=512
+                        )
+                        image = result.images[0]
+                    
+                    logger.info(f"🎯 리워드 계산 시작 (GPU {self.reward_device})")
+                    
+                    # CLIP 리워드를 GPU 2에서 계산
+                    with torch.cuda.device(2):
+                        reward = self.reward_model.calculate_reward(
+                            self.original_prompt,
+                            self.current_prompt,
+                            image
+                        )
                     
                     # 길이 보너스
                     length_bonus = min(self.step_count / self.config.max_new_tokens, 1.0) * 0.5
                     total_reward = reward + length_bonus
+                    
+                    logger.info(f"✅ 리워드 계산 완료: {total_reward:.4f}")
                     
                 except Exception as e:
                     logger.warning(f"Reward calculation failed: {e}")
@@ -231,7 +258,7 @@ class PureGRPOPromptEnvironment:
             else:
                 total_reward = 0.0
             
-            # 다음 상태
+            # 다음 상태 (GPU 0으로 이동)
             if not done:
                 next_tokens = self.tokenizer.encode(
                     self.current_prompt,
@@ -242,9 +269,10 @@ class PureGRPOPromptEnvironment:
                 )
                 next_attention_mask = torch.ones_like(next_tokens)
                 
+                # 다음 상태를 QWEN GPU(0번)로 이동
                 next_state = {
-                    'input_ids': next_tokens.squeeze(0),
-                    'attention_mask': next_attention_mask.squeeze(0)
+                    'input_ids': next_tokens.squeeze(0).to(self.qwen_device),
+                    'attention_mask': next_attention_mask.squeeze(0).to(self.qwen_device)
                 }
             else:
                 next_state = None
@@ -413,7 +441,7 @@ class PureGRPOTrainer:
         # 패딩을 위한 최대 길이 찾기
         max_length = max(state['input_ids'].size(0) for state in batch_states)
         
-        # 패딩된 텐서 생성
+        # 패딩된 텐서 생성 및 GPU 0으로 이동
         padded_input_ids = []
         padded_attention_masks = []
         
@@ -425,28 +453,29 @@ class PureGRPOTrainer:
             pad_length = max_length - input_ids_tensor.size(0)
             
             if pad_length > 0:
-                # 패딩 추가 (오른쪽에 패딩)
+                # 패딩 추가 (오른쪽에 패딩) - GPU 0에서
                 padded_input = torch.cat([
                     input_ids_tensor,
-                    torch.zeros(pad_length, dtype=input_ids_tensor.dtype)
+                    torch.zeros(pad_length, dtype=input_ids_tensor.dtype, device="cuda:0")
                 ])
                 padded_mask = torch.cat([
                     attention_mask_tensor,
-                    torch.zeros(pad_length, dtype=attention_mask_tensor.dtype)
+                    torch.zeros(pad_length, dtype=attention_mask_tensor.dtype, device="cuda:0")
                 ])
             else:
-                padded_input = input_ids_tensor
-                padded_mask = attention_mask_tensor
+                padded_input = input_ids_tensor.to("cuda:0")
+                padded_mask = attention_mask_tensor.to("cuda:0")
             
             padded_input_ids.append(padded_input)
             padded_attention_masks.append(padded_mask)
         
-        input_ids = torch.stack(padded_input_ids)
-        attention_masks = torch.stack(padded_attention_masks)
-        actions = torch.tensor(actions)
-        old_log_probs = torch.stack(old_log_probs)
-        ref_log_probs = torch.stack(ref_log_probs)
-        advantages = torch.tensor(advantages, dtype=torch.float32)
+        # 모든 텐서를 GPU 0으로 이동
+        input_ids = torch.stack(padded_input_ids).to("cuda:0")
+        attention_masks = torch.stack(padded_attention_masks).to("cuda:0")
+        actions = torch.tensor(actions).to("cuda:0")
+        old_log_probs = torch.stack(old_log_probs).to("cuda:0")
+        ref_log_probs = torch.stack(ref_log_probs).to("cuda:0")
+        advantages = torch.tensor(advantages, dtype=torch.float32).to("cuda:0")
         
         # 오직 정책 로짓만 계산! (Values 없음)
         policy_logits = self.policy(input_ids, attention_masks)
