@@ -145,7 +145,7 @@ def main():
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
     # QWEN GRPO 설정
-            config = QWENGRPOConfig(
+    config = QWENGRPOConfig(
         learning_rate=1e-6,
         batch_size=4,
         num_rollouts=3,  # 롤아웃 수 줄임 (각 프롬프트당 3개 롤아웃)
