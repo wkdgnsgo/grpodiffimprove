@@ -23,7 +23,7 @@ from qwen import QWENModel, QWENGRPOConfig
 logger = logging.getLogger(__name__)
 
 class QWENGRPOEnvironment:
-    """QWEN GRPO 통합 환경"""
+    """QWEN GRPO 통합 환경 (Accelerate 지원)"""
     
     def __init__(self, qwen_model: QWENModel, reward_model, sd_pipeline, config: QWENGRPOConfig):
         self.qwen_model = qwen_model
@@ -31,10 +31,11 @@ class QWENGRPOEnvironment:
         self.sd_pipeline = sd_pipeline
         self.config = config
         
-        # GPU 디바이스 설정
-        self.qwen_device = "cuda:0"    # QWEN (프롬프트 향상)
-        self.sd_device = "cuda:1"      # Stable Diffusion (이미지 생성)
-        self.reward_device = "cuda:2"  # CLIP Reward (리워드 계산)
+        # GPU 디바이스 설정 (Accelerate 멀티 GPU 환경)
+        self.qwen_device = "auto"         # Accelerate가 관리
+        self.sd_device = "cuda:4"         # SD3 (GPU 4번)
+        self.reward_device = "cuda:4"     # CLIP Reward (GPU 4번)
+        self.ref_device = "cuda:4"        # Reference model (GPU 4번)
         
         self.current_user_prompt = ""
         self.current_enhanced_prompt = ""
@@ -74,7 +75,7 @@ class QWENGRPOEnvironment:
         }
     
     def step(self, enhanced_prompt: str) -> Tuple[Dict, float, bool, Dict]:
-        """환경 스텝 - QWEN에서 생성된 향상된 프롬프트 사용"""
+        """환경 스텝 - QWEN에서 생성된 향상된 프롬프트 사용 (Accelerate 지원)"""
         original_image = None
         enhanced_image = None
         original_reward = 0.0
@@ -83,17 +84,17 @@ class QWENGRPOEnvironment:
         
         try:
             # QWEN에서 이미 생성된 향상된 프롬프트 사용
-            logger.info(f"🧠 QWEN 생성된 프롬프트 사용 (GPU {self.qwen_device})")
+            logger.info(f"🧠 QWEN 생성된 프롬프트 사용 (Accelerate 분산)")
             
             self.current_enhanced_prompt = enhanced_prompt
             
             logger.info(f"✅ 사용된 프롬프트: '{enhanced_prompt[:50]}...'")
             
-            # 이미지 생성 시도
+            # 이미지 생성 시도 (GPU 4번)
             try:
-                logger.info(f"🖼️  이미지 생성 시작 (GPU {self.sd_device})")
+                logger.info(f"🖼️  이미지 생성 시작 (GPU 4번 - 통합)")
                 
-                with torch.cuda.device(1):
+                with torch.cuda.device(4):
                     # 원본 프롬프트로 이미지 생성
                     original_result = self.sd_pipeline(
                         prompt=self.current_user_prompt,
@@ -123,12 +124,12 @@ class QWENGRPOEnvironment:
                 original_image = Image.new('RGB', (1024, 1024), color='black')
                 enhanced_image = Image.new('RGB', (1024, 1024), color='black')
             
-            # 리워드 계산 시도
+            # 리워드 계산 시도 (GPU 4번)
             try:
-                logger.info(f"🎯 리워드 계산 시작 (GPU {self.reward_device})")
+                logger.info(f"🎯 리워드 계산 시작 (GPU 4번 - 통합)")
                 
-                # CLIP 리워드를 GPU 2에서 계산
-                with torch.cuda.device(2):
+                # CLIP 리워드를 GPU 4에서 계산
+                with torch.cuda.device(4):
                     enhanced_reward = self.reward_model.calculate_reward(
                         self.current_user_prompt,
                         self.current_enhanced_prompt,
@@ -276,13 +277,14 @@ Images could not be generated/saved due to the error above.
             logger.error(f"❌ 에러 로그 저장도 실패: {log_error}")
 
 class QWENGRPOTrainer:
-    """QWEN 통합 GRPO 트레이너"""
+    """QWEN 통합 GRPO 트레이너 (Accelerate 지원)"""
     
     def __init__(self, qwen_model: QWENModel, reward_model, sd_pipeline, config: QWENGRPOConfig):
         self.config = config
         self.qwen_model = qwen_model
         self.reward_model = reward_model
         self.sd_pipeline = sd_pipeline
+        self.accelerator = None  # Accelerate 객체 (나중에 설정)
         
         # QWEN 모델에 GRPO 컴포넌트가 설정되어 있는지 확인
         if not hasattr(qwen_model, 'ref_model'):
@@ -304,7 +306,7 @@ class QWENGRPOTrainer:
         plt.ion()  # Interactive mode on
         
         logger.info("🎯 QWEN GRPO 트레이너 초기화 완료")
-        logger.info(f"✅ QWEN 직접 학습 방식으로 설정")
+        logger.info(f"✅ QWEN 직접 학습 방식으로 설정 (Accelerate 지원)")
         logger.info(f"📊 플롯 저장 디렉토리: {self.plot_save_dir}")
     
     def collect_rollouts(self, prompts: List[str], is_baseline: bool = False) -> List[Dict]:
@@ -328,8 +330,11 @@ class QWENGRPOTrainer:
                     
                     state = self.env.reset(user_prompt)
                     
-                    # QWEN GRPO로 향상된 프롬프트 생성
-                    with torch.cuda.device(0):
+                    # QWEN GRPO로 향상된 프롬프트 생성 (Accelerate 분산)
+                    if self.accelerator:
+                        with self.accelerator.device:
+                            enhanced_prompt, log_prob = self.qwen_model.generate_grpo_enhanced_prompt(user_prompt)
+                    else:
                         enhanced_prompt, log_prob = self.qwen_model.generate_grpo_enhanced_prompt(user_prompt)
                     
                     logger.info(f"    🎯 생성된 프롬프트: '{enhanced_prompt[:50]}...' (로그 확률: {log_prob:.4f})")
@@ -399,9 +404,13 @@ class QWENGRPOTrainer:
         # 어드밴티지 계산
         experiences = self.compute_grpo_advantages(experiences)
         
-        # QWEN 모델의 GRPO 업데이트 호출
-        with torch.cuda.device(0):
+        # QWEN 모델의 GRPO 업데이트 호출 (Accelerate 지원)
+        if self.accelerator:
+            # Accelerate 환경에서는 device context 불필요
             metrics = self.qwen_model.update_grpo_policy(experiences)
+        else:
+            with torch.cuda.device(0):
+                metrics = self.qwen_model.update_grpo_policy(experiences)
         
         logger.info(f"✅ GRPO 업데이트 완료")
         logger.info(f"  Policy Loss: {metrics.get('policy_loss', 0):.4f}")
@@ -501,12 +510,17 @@ class QWENGRPOTrainer:
         """샘플 출력 로깅"""
         for prompt in sample_prompts:
             try:
-                with torch.cuda.device(0):
-                    # 기본 향상
+                if self.accelerator:
+                    # Accelerate 환경에서 샘플 출력
                     basic_result = self.qwen_model.enhance_prompt(prompt)
-                    
-                    # GRPO 기반 생성
                     grpo_enhanced, _ = self.qwen_model.generate_grpo_enhanced_prompt(prompt)
+                else:
+                    with torch.cuda.device(0):
+                        # 기본 향상
+                        basic_result = self.qwen_model.enhance_prompt(prompt)
+                        
+                        # GRPO 기반 생성
+                        grpo_enhanced, _ = self.qwen_model.generate_grpo_enhanced_prompt(prompt)
                 
                 logger.info(f"  원본: '{prompt}'")
                 logger.info(f"  기본: '{basic_result['enhanced_prompt'][:60]}...'")

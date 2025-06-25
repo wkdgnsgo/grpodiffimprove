@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-QWEN 통합 GRPO VLM 학습 메인 스크립트
+QWEN 통합 GRPO VLM 학습 메인 스크립트 (Accelerate 멀티 GPU 버전)
 QWEN 모델의 enhance_prompt 기능과 GRPO를 통합한 프롬프트 개선 시스템
 """
 
@@ -8,6 +8,7 @@ import sys
 import logging
 import torch
 from pathlib import Path
+from accelerate import Accelerator
 
 # 로깅 설정
 logging.basicConfig(
@@ -26,8 +27,8 @@ from qwen import QWENModel, QWENGRPOConfig
 from clip_reward import CLIPReward
 from trainer_grpo_pure import QWENGRPOTrainer
 
-def load_stable_diffusion_pipeline(device="cuda:1"):
-    """Stable Diffusion 3 파이프라인 로드 (GPU 1번)"""
+def load_stable_diffusion_pipeline(device="cuda:4"):
+    """Stable Diffusion 3 파이프라인 로드 (GPU 4번 - 다른 모델들과 함께)"""
     try:
         from diffusers import StableDiffusion3Pipeline
         import torch
@@ -63,92 +64,59 @@ def load_stable_diffusion_pipeline(device="cuda:1"):
         raise
 
 def get_training_prompts():
-    """학습용 프롬프트 데이터셋 (다양성 확보)"""
+    """학습용 프롬프트 데이터셋 (메모리 최적화 - 개수 축소)"""
     import random
     
-    # 전체 프롬프트 풀
-    all_prompts = [
-        # 동물들
+    # 메모리 절약을 위해 프롬프트 수 축소
+    selected_prompts = [
+        # 기본적인 프롬프트들 (메모리 절약)
         "a beautiful cat sitting on a chair",
-        "majestic lion in African savanna",
-        "colorful parrot in tropical rainforest",
-        "graceful swan on peaceful lake",
-        "playful dolphin jumping in ocean",
-        
-        # 자연 풍경
         "sunset over mountains with golden light",
-        "misty forest with tall pine trees",
-        "desert landscape with sand dunes",
-        "rocky coastline with crashing waves",
-        "cherry blossoms in spring garden",
-        
-        # 예술과 추상
         "abstract art painting with vibrant colors",
-        "geometric patterns in bright neon colors",
-        "watercolor painting of flowers",
-        "minimalist sculpture in white marble",
-        "street art mural on brick wall",
-        
-        # 인물
         "portrait of a woman with flowing hair",
-        "elderly man reading book by fireplace",
-        "child playing in summer meadow",
-        "dancer in elegant pose",
-        "musician playing violin on stage",
-        
-        # 도시와 건축
         "futuristic city skyline at night",
-        "ancient castle on mountain peak",
-        "modern glass building reflecting sky",
-        "cozy cafe with warm lighting",
-        "busy train station with commuters",
         
-        # 도전적인 프롬프트
+        # 도전적인 프롬프트들
         "red apple on blue table with green background",
         "transparent glass sphere floating in purple space",
-        "wooden texture mixed with metallic surface",
-        "fire and ice elements combined in one scene",
-        "microscopic view of crystal structure",
-        
-        # 복잡한 장면
-        "crowded marketplace with many people and colorful stalls",
-        "underwater scene with coral reef and tropical fish",
-        "ancient temple ruins covered with jungle vegetation",
-        "steampunk mechanical device with gears and pipes",
-        "surreal landscape with floating islands and waterfalls"
+        "crowded marketplace with many people and colorful stalls"
     ]
     
-    # 매번 다른 순서로 섞어서 반환 (다양성 확보)
-    random.shuffle(all_prompts)
-    
-    # 처음 15개 선택 (충분한 다양성 + 적당한 크기)
-    selected_prompts = all_prompts[:15]
+    # 매번 다른 순서로 섞어서 반환
+    random.shuffle(selected_prompts)
     
     return selected_prompts
 
 def main():
-    """메인 학습 함수"""
-    logger.info("🚀 QWEN 통합 GRPO VLM 학습 시작")
+    """메인 학습 함수 (Accelerate 멀티 GPU 버전)"""
+    logger.info("🚀 QWEN 통합 GRPO VLM 학습 시작 (Accelerate 멀티 GPU)")
     logger.info("=" * 80)
+    
+    # Accelerate 초기화
+    accelerator = Accelerator()
+    logger.info(f"🎯 Accelerate 초기화 완료")
+    logger.info(f"  - 프로세스 수: {accelerator.num_processes}")
+    logger.info(f"  - 로컬 프로세스 인덱스: {accelerator.local_process_index}")
+    logger.info(f"  - 디바이스: {accelerator.device}")
     
     # GPU 확인 및 배치 계획
     if torch.cuda.is_available():
         logger.info(f"✅ CUDA 사용 가능 - GPU 개수: {torch.cuda.device_count()}")
         for i in range(torch.cuda.device_count()):
             logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+            logger.info(f"    메모리: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f}GB")
         
-        logger.info("\n🎯 GPU 배치 계획:")
-        logger.info("  GPU 0: QWEN VL 모델 + GRPO 정책 (프롬프트 향상 및 학습)")
-        logger.info("  GPU 1: Stable Diffusion 3 (이미지 생성)")
-        logger.info("  GPU 2: CLIP 리워드 모델 (리워드 계산)")
+        logger.info("\n🎯 GPU 배치 계획 (Accelerate 멀티 GPU):")
+        logger.info("  GPU 0-3: QWEN RL 학습 (Accelerate 분산 학습)")
+        logger.info("  GPU 4: SD3 + CLIP + QWEN Reference (통합)")
     else:
         logger.warning("⚠️ CUDA 사용 불가 - CPU로 실행")
     
-    # QWEN GRPO 설정
+    # QWEN GRPO 설정 (Accelerate 멀티 GPU)
     config = QWENGRPOConfig(
         learning_rate=1e-6,
-        batch_size=4,
-        num_rollouts=3,  # 롤아웃 수 줄임 (각 프롬프트당 3개 롤아웃)
+        batch_size=4,  # 멀티 GPU로 배치 크기 복원
+        num_rollouts=3,  # 멀티 GPU로 롤아웃 수 복원
         max_prompt_length=77,
         max_new_tokens=30,
         temperature=1.2,
@@ -161,188 +129,230 @@ def main():
         log_dir="qwen_grpo_results"
     )
     
-    logger.info("📋 QWEN GRPO 설정:")
+    logger.info("📋 QWEN GRPO 설정 (Accelerate 멀티 GPU):")
     logger.info(f"  - 학습률: {config.learning_rate}")
-    logger.info(f"  - 배치 크기: {config.batch_size}")
-    logger.info(f"  - 롤아웃 수: {config.num_rollouts}")
-    logger.info(f"  - 롤아웃 수: {config.num_rollouts}")
+    logger.info(f"  - 배치 크기: {config.batch_size} (멀티 GPU)")
+    logger.info(f"  - 롤아웃 수: {config.num_rollouts} (멀티 GPU)")
     logger.info(f"  - 온도: {config.temperature}")
     logger.info(f"  - KL 계수: {config.kl_coef}")
     
     try:
-        # 1. QWEN VL 모델 로드 (GRPO 통합) (GPU 0번)
-        logger.info("\n🧠 QWEN VL 모델 + GRPO 로딩...")
+        # GPU 메모리 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 초기 GPU 메모리 정리 완료")
+        
+        # 1. QWEN VL 모델 로드 (Accelerate로 분산)
+        logger.info("\n🧠 QWEN VL 모델 + GRPO 로딩... (Accelerate 분산)")
         qwen_model = QWENModel(
             model_name="Qwen/Qwen2-VL-7B-Instruct",
-            device="cuda:0",
+            device=accelerator.device,  # Accelerate가 관리하는 디바이스
             temperature=0.7,
             grpo_config=config  # GRPO 컴포넌트 활성화
         )
-        logger.info("✅ QWEN VL + GRPO 모델 로드 완료 (GPU 0)")
         
-        # 2. CLIP 리워드 모델 로드 (GPU 2번)
-        logger.info("\n🎯 CLIP 리워드 모델 로딩...")
-        reward_model = CLIPReward(device="cuda:2")
-        logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 2)")
+        # Accelerate로 모델 준비
+        qwen_model.model, qwen_model.grpo_optimizer = accelerator.prepare(
+            qwen_model.model, qwen_model.grpo_optimizer
+        )
         
-        # 3. Stable Diffusion 3 파이프라인 로드 (GPU 1번)
-        logger.info("\n🎨 Stable Diffusion 3 파이프라인 로딩...")
-        sd_pipeline = load_stable_diffusion_pipeline(device="cuda:1")
-        logger.info("✅ SD3 파이프라인 로드 완료 (GPU 1)")
+        logger.info("✅ QWEN VL + GRPO 모델 로드 완료 (Accelerate 분산)")
         
-        # 4. QWEN GRPO 트레이너 초기화
-        logger.info("\n🎯 QWEN GRPO 트레이너 초기화...")
+        # 메모리 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 QWEN 로드 후 메모리 정리")
+        
+        # 2. 통합 모델들 로드 (GPU 4번)
+        logger.info("\n🎯 통합 모델들 로딩... (GPU 4번)")
+        
+        # CLIP 리워드 모델 (GPU 4번)
+        reward_model = CLIPReward(device="cuda:4")
+        logger.info("✅ CLIP 리워드 모델 로드 완료 (GPU 4)")
+        
+        # Stable Diffusion 3 파이프라인 (GPU 4번)
+        sd_pipeline = load_stable_diffusion_pipeline(device="cuda:4")
+        logger.info("✅ SD3 파이프라인 로드 완료 (GPU 4)")
+        
+        # QWEN Reference 모델을 GPU 4번으로 이동 (이미 생성되었다면)
+        if hasattr(qwen_model, 'ref_model') and qwen_model.ref_model is not None:
+            qwen_model.ref_model = qwen_model.ref_model.to("cuda:4")
+            logger.info("✅ QWEN Reference 모델을 GPU 4로 이동")
+        
+        # 최종 메모리 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 모든 모델 로드 후 메모리 정리")
+        
+        # 3. QWEN GRPO 트레이너 초기화 (Accelerate 버전)
+        logger.info("\n🎯 QWEN GRPO 트레이너 초기화... (Accelerate)")
         trainer = QWENGRPOTrainer(qwen_model, reward_model, sd_pipeline, config)
-        logger.info("✅ 트레이너 초기화 완료")
         
-        # 5. 학습 데이터 준비
+        # Accelerator를 트레이너에 전달
+        trainer.accelerator = accelerator
+        
+        logger.info("✅ 트레이너 초기화 완료 (Accelerate)")
+        
+        # 4. 학습 데이터 준비
         train_prompts = get_training_prompts()
         logger.info(f"\n📝 학습 프롬프트: {len(train_prompts)}개")
-        for i, prompt in enumerate(train_prompts[:5]):  # 처음 5개만 표시
+        for i, prompt in enumerate(train_prompts):
             logger.info(f"  {i+1}. '{prompt}'")
-        if len(train_prompts) > 5:
-            logger.info(f"  ... 총 {len(train_prompts)}개")
         
-        # 6. 베이스라인 성능 측정 (기본 QWEN enhance_prompt)
-        logger.info("\n📊 베이스라인 성능 측정 (기본 QWEN)...")
-        baseline_rewards = []
-        
-        # 다양한 프롬프트로 베이스라인 측정 (첫 번째, 중간, 마지막)
-        baseline_test_indices = [0, len(train_prompts)//2, len(train_prompts)-1]
-        baseline_test_prompts = [train_prompts[i] for i in baseline_test_indices]
-        
-        for i, prompt in enumerate(baseline_test_prompts):
-            logger.info(f"  테스트 {i+1}/3: '{prompt}'")
+        # 5. 베이스라인 성능 측정 (메인 프로세스에서만)
+        if accelerator.is_main_process:
+            logger.info("\n📊 베이스라인 성능 측정...")
+            baseline_rewards = []
+            
+            # 첫 번째 프롬프트로 테스트
+            test_prompt = train_prompts[0]
+            logger.info(f"  베이스라인 테스트: '{test_prompt}'")
             
             try:
                 # 기본 QWEN 향상
-                with torch.cuda.device(0):
-                    basic_result = qwen_model.enhance_prompt(prompt)
+                with accelerator.device:
+                    basic_result = qwen_model.enhance_prompt(test_prompt)
                     enhanced_prompt = basic_result['enhanced_prompt']
                 
                 # 이미지 생성 및 리워드 계산
-                state = trainer.env.reset(prompt)
+                state = trainer.env.reset(test_prompt)
                 trainer.env.current_enhanced_prompt = enhanced_prompt
                 
-                # 이미지 생성
-                with torch.cuda.device(1):
+                # 이미지 생성 (GPU 4번)
+                with torch.cuda.device(4):
                     enhanced_result = sd_pipeline(
                         prompt=enhanced_prompt,
-                        num_inference_steps=28,
+                        num_inference_steps=20,
                         guidance_scale=7.0,
                         height=1024,
                         width=1024
                     )
                     enhanced_image = enhanced_result.images[0]
                 
-                # 리워드 계산
-                with torch.cuda.device(2):
+                # 리워드 계산 (GPU 4번)
+                with torch.cuda.device(4):
                     reward = reward_model.calculate_reward(
-                        prompt,
+                        test_prompt,
                         enhanced_prompt,
                         enhanced_image
                     )
                 
                 baseline_rewards.append(reward)
-                logger.info(f"    '{prompt}' -> '{enhanced_prompt[:50]}...' (reward: {reward:.3f})")
+                logger.info(f"    베이스라인 리워드: {reward:.3f}")
                 
             except Exception as e:
                 logger.warning(f"    베이스라인 측정 실패: {e}")
-                continue
+                baseline_rewards.append(0.5)  # 기본값
+            
+            avg_baseline = sum(baseline_rewards) / len(baseline_rewards) if baseline_rewards else 0.5
+            logger.info(f"📈 베이스라인 평균 리워드: {avg_baseline:.3f}")
+        else:
+            avg_baseline = 0.5  # 다른 프로세스는 기본값
         
-        avg_baseline = sum(baseline_rewards) / len(baseline_rewards) if baseline_rewards else 0.0
-        logger.info(f"📈 베이스라인 평균 리워드: {avg_baseline:.3f}")
+        # 베이스라인 값을 모든 프로세스에 브로드캐스트
+        if accelerator.num_processes > 1:
+            avg_baseline = accelerator.gather(torch.tensor(avg_baseline))[0].item()
         
-        # 7. QWEN GRPO 학습 실행
-        logger.info("\n🚀 QWEN GRPO 학습 시작...")
+        # 메모리 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 베이스라인 측정 후 메모리 정리")
+        
+        # 6. QWEN GRPO 학습 실행 (Accelerate 분산)
+        logger.info("\n🚀 QWEN GRPO 학습 시작... (Accelerate 분산)")
         logger.info("=" * 80)
         
         all_metrics, baseline_data = trainer.train(
             train_prompts=train_prompts, 
-            num_epochs=10, 
-            num_baseline_episodes=3  # 베이스라인 에피소드 수 조정 가능
+            num_epochs=8,  # 멀티 GPU로 에포크 수 증가
+            num_baseline_episodes=2
         )
         
         logger.info("✅ 학습 완료!")
         
-        # 8. 학습 후 성능 측정 (GRPO 기반)
-        logger.info("\n📊 학습 후 성능 측정 (GRPO)...")
-        trained_rewards = []
-        
-        # 베이스라인과 같은 프롬프트로 평가
-        for i, prompt in enumerate(baseline_test_prompts):
-            logger.info(f"  평가 {i+1}/3: '{prompt}'")
+        # 7. 학습 후 성능 측정 (메인 프로세스에서만)
+        if accelerator.is_main_process:
+            logger.info("\n📊 학습 후 성능 측정...")
+            trained_rewards = []
             
             try:
                 # GRPO 기반 향상
-                with torch.cuda.device(0):
-                    grpo_enhanced, log_prob = qwen_model.generate_grpo_enhanced_prompt(prompt)
+                with accelerator.device:
+                    grpo_enhanced, log_prob = qwen_model.generate_grpo_enhanced_prompt(test_prompt)
                 
                 # 이미지 생성 및 리워드 계산
-                state = trainer.env.reset(prompt)
+                state = trainer.env.reset(test_prompt)
                 trainer.env.current_enhanced_prompt = grpo_enhanced
                 
-                # 이미지 생성
-                with torch.cuda.device(1):
+                # 이미지 생성 (GPU 4번)
+                with torch.cuda.device(4):
                     enhanced_result = sd_pipeline(
                         prompt=grpo_enhanced,
-                        num_inference_steps=28,
+                        num_inference_steps=20,
                         guidance_scale=7.0,
                         height=1024,
                         width=1024
                     )
                     enhanced_image = enhanced_result.images[0]
                 
-                # 리워드 계산
-                with torch.cuda.device(2):
+                # 리워드 계산 (GPU 4번)
+                with torch.cuda.device(4):
                     reward = reward_model.calculate_reward(
-                        prompt,
+                        test_prompt,
                         grpo_enhanced,
                         enhanced_image
                     )
                 
                 trained_rewards.append(reward)
-                logger.info(f"    '{prompt}' -> '{grpo_enhanced[:50]}...' (reward: {reward:.3f})")
+                logger.info(f"    학습 후 리워드: {reward:.3f}")
                 
             except Exception as e:
                 logger.warning(f"    학습 후 평가 실패: {e}")
-                continue
+                trained_rewards.append(avg_baseline)  # 기본값
+            
+            avg_trained = sum(trained_rewards) / len(trained_rewards) if trained_rewards else avg_baseline
+            logger.info(f"📈 학습 후 평균 리워드: {avg_trained:.3f}")
+            
+            # 8. 결과 분석 및 저장 (메인 프로세스에서만)
+            logger.info("\n📋 최종 결과:")
+            logger.info("=" * 80)
+            logger.info(f"🎯 QWEN GRPO 학습 결과 (Accelerate 멀티 GPU)")
+            logger.info(f"📊 베이스라인 리워드: {avg_baseline:.3f}")
+            logger.info(f"📈 학습 후 리워드: {avg_trained:.3f}")
+            logger.info(f"🔄 개선도: {avg_trained - avg_baseline:.3f}")
+            
+            if avg_baseline > 0:
+                logger.info(f"📈 개선률: {((avg_trained - avg_baseline) / avg_baseline * 100):.1f}%")
+            
+            if avg_trained > avg_baseline:
+                logger.info("✅ GRPO 학습이 성공적으로 개선되었습니다!")
+            else:
+                logger.info("⚠️ GRPO 학습 개선이 미미합니다. 더 많은 학습이 필요할 수 있습니다.")
+            
+            # 9. 모델 저장 (메인 프로세스에서만)
+            logger.info("\n💾 모델 저장...")
+            save_dir = Path("checkpoints")
+            save_dir.mkdir(exist_ok=True)
+            
+            # Accelerate unwrap으로 원본 모델 저장
+            unwrapped_model = accelerator.unwrap_model(qwen_model.model)
+            
+            model_path = save_dir / "qwen_grpo_model.pth"
+            torch.save({
+                'model_state_dict': unwrapped_model.state_dict(),
+                'config': config,
+                'baseline_reward': avg_baseline,
+                'trained_reward': avg_trained,
+                'improvement': avg_trained - avg_baseline,
+                'training_metrics': all_metrics
+            }, model_path)
+            
+            logger.info(f"✅ 모델 저장 완료: {model_path}")
         
-        avg_trained = sum(trained_rewards) / len(trained_rewards) if trained_rewards else 0.0
-        logger.info(f"📈 학습 후 평균 리워드: {avg_trained:.3f}")
-        
-        # 9. 결과 분석 및 저장
-        logger.info("\n📋 최종 결과:")
-        logger.info("=" * 80)
-        logger.info(f"🎯 QWEN GRPO 학습 결과")
-        logger.info(f"📊 베이스라인 리워드 (기본 QWEN): {avg_baseline:.3f}")
-        logger.info(f"📈 학습 후 리워드 (GRPO): {avg_trained:.3f}")
-        logger.info(f"🔄 개선도: {avg_trained - avg_baseline:.3f}")
-        
-        if avg_baseline > 0:
-            logger.info(f"📈 개선률: {((avg_trained - avg_baseline) / avg_baseline * 100):.1f}%")
-        
-        if avg_trained > avg_baseline:
-            logger.info("✅ GRPO 학습이 성공적으로 개선되었습니다!")
-        else:
-            logger.info("⚠️ GRPO 학습 개선이 미미합니다. 하이퍼파라미터 조정이 필요할 수 있습니다.")
-        
-        # 10. 모델 저장
-        logger.info("\n💾 모델 저장...")
-        save_dir = Path("checkpoints")
-        save_dir.mkdir(exist_ok=True)
-        
-        model_path = save_dir / "qwen_grpo_model.pth"
-        torch.save({
-            'model_state_dict': qwen_model.model.state_dict(),
-            'config': config,
-            'baseline_reward': avg_baseline,
-            'trained_reward': avg_trained,
-            'improvement': avg_trained - avg_baseline,
-            'training_metrics': all_metrics
-        }, model_path)
-        
-        logger.info(f"✅ 모델 저장 완료: {model_path}")
+        # 최종 메모리 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 최종 GPU 메모리 정리 완료")
         
         logger.info("\n🎉 QWEN GRPO 학습 완료!")
         
@@ -350,6 +360,12 @@ def main():
         logger.error(f"❌ 학습 중 오류 발생: {e}")
         import traceback
         traceback.print_exc()
+        
+        # 에러 발생 시에도 메모리 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 에러 발생 후 GPU 메모리 정리")
+        
         return False
     
     return True

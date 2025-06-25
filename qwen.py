@@ -58,13 +58,22 @@ class QWENModel:
         model_kwargs = {
             'torch_dtype': torch.float16,
             'trust_remote_code': True,
-            'low_cpu_mem_usage': True
+            'low_cpu_mem_usage': True,
+            'device_map': 'auto',  # 자동 GPU 분산
+            'max_memory': {0: "18GB", 1: "8GB", 2: "8GB"}  # GPU별 메모리 제한
         }
 
+        logger.info("🔧 QWEN 7B 모델 로딩 중... (메모리 최적화 적용)")
+        
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.model_name,
                 **model_kwargs
-        ).to(self.device)
+        )
+        
+        # 메모리 최적화 설정
+        if hasattr(self.model, 'gradient_checkpointing_enable'):
+            self.model.gradient_checkpointing_enable()
+            logger.info("✅ Gradient checkpointing 활성화")
 
         if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -79,8 +88,8 @@ class QWENModel:
             eos_token_id=self.tokenizer.eos_token_id
         )
         
-        logger.info("Model loaded")
-        
+        logger.info("✅ QWEN 모델 로드 완료 (메모리 최적화 적용)")
+
     def _setup_prompt_template(self):
          
         # 생성 지시를 위한 시스템 프롬프트
@@ -104,18 +113,53 @@ class QWENModel:
         Enhanced version:"""
 
     def _setup_grpo_components(self):
-        """GRPO 관련 컴포넌트 설정 - QWEN 직접 학습"""
+        """GRPO 관련 컴포넌트 설정 - 메모리 최적화 버전"""
         self.hidden_size = self.model.config.hidden_size
         self.vocab_size = len(self.tokenizer.get_vocab())
         
-        # 참조 모델 (frozen copy of QWEN for KL penalty)
-        from copy import deepcopy
-        self.ref_model = deepcopy(self.model)
-        self.ref_model.eval()
+        logger.info("🔧 GRPO 컴포넌트 초기화 중... (메모리 최적화)")
         
-        # 참조 모델의 모든 파라미터를 freeze
-        for param in self.ref_model.parameters():
-            param.requires_grad = False
+        # 참조 모델을 GPU 4번으로 강제 이동 (Accelerate 멀티 GPU 환경)
+        try:
+            # GPU 4번이 있으면 사용, 아니면 CPU 사용
+            if torch.cuda.device_count() > 4:
+                ref_device = "cuda:4"
+                logger.info("📍 Reference model을 GPU 4번으로 이동 (통합 GPU)")
+            elif torch.cuda.device_count() > 3:
+                ref_device = "cuda:3"
+                logger.info("📍 Reference model을 GPU 3번으로 이동")
+            else:
+                ref_device = "cpu"
+                logger.info("📍 Reference model을 CPU로 이동 (메모리 절약)")
+            
+            # 참조 모델 생성 (메모리 효율적)
+            from copy import deepcopy
+            
+            # 원본 모델을 CPU로 임시 이동
+            original_device = next(self.model.parameters()).device
+            logger.info(f"💾 Reference model 생성을 위해 임시 CPU 이동...")
+            
+            # CPU에서 복사 (메모리 절약)
+            self.model = self.model.cpu()
+            self.ref_model = deepcopy(self.model)
+            
+            # Reference model을 지정된 디바이스로 이동
+            self.ref_model = self.ref_model.to(ref_device)
+            self.ref_model.eval()
+            
+            # 원본 모델을 다시 원래 디바이스로 이동
+            self.model = self.model.to(original_device)
+            
+            # 참조 모델의 모든 파라미터를 freeze
+            for param in self.ref_model.parameters():
+                param.requires_grad = False
+            
+            logger.info(f"✅ Reference model 설정 완료 ({ref_device})")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Reference model 설정 실패: {e}")
+            logger.info("🔄 Fallback: Reference model 없이 진행 (KL penalty 비활성화)")
+            self.ref_model = None
         
         # 옵티마이저 (QWEN 모델만 학습)
         self.grpo_optimizer = torch.optim.AdamW(
@@ -124,7 +168,12 @@ class QWENModel:
             weight_decay=0.01
         )
         
-        logger.info("✅ GRPO 컴포넌트 초기화 완료")
+        # 메모리 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 GPU 메모리 캐시 정리 완료")
+        
+        logger.info("✅ GRPO 컴포넌트 초기화 완료 (메모리 최적화)")
         logger.info(f"📊 QWEN 모델 직접 학습 방식으로 설정")
 
     def _init_grpo_weights(self):
@@ -367,7 +416,11 @@ class QWENModel:
         return enhanced_prompt, avg_log_prob
 
     def get_ref_model_log_prob(self, user_prompt: str, enhanced_prompt: str) -> torch.Tensor:
-        """참조 모델의 로그 확률 계산"""
+        """참조 모델의 로그 확률 계산 (메모리 최적화 버전)"""
+        # Reference model이 없으면 더미 값 반환
+        if self.ref_model is None:
+            return torch.tensor(0.0, device=self.device, dtype=torch.float16)
+        
         # VLM에 입력할 메시지 구성
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -384,13 +437,16 @@ class QWENModel:
         # 전체 시퀀스 (프롬프트 + 생성된 텍스트)
         full_text = prompt + enhanced_prompt
         
-        # 토크나이징
+        # Reference model의 디바이스 확인
+        ref_device = next(self.ref_model.parameters()).device
+        
+        # 토크나이징 (Reference model 디바이스에 맞춤)
         inputs = self.tokenizer(
             full_text, 
             return_tensors="pt", 
             padding=True, 
             truncation=True
-        ).to(self.device)
+        ).to(ref_device)
         
         # 참조 모델로 로그 확률 계산
         with torch.no_grad():
@@ -407,7 +463,9 @@ class QWENModel:
             log_probs = F.log_softmax(generated_logits, dim=-1)
             token_log_probs = log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
             
-            return token_log_probs.mean()
+            # 결과를 main model device로 이동
+            result = token_log_probs.mean().to(self.device)
+            return result
 
     def update_grpo_policy(self, experiences: List[Dict]) -> Dict:
         """GRPO 정책 업데이트 (QWEN 직접 학습)"""
@@ -443,7 +501,7 @@ class QWENModel:
             _, current_log_prob = self.generate_grpo_enhanced_prompt(user_prompt)
             current_log_probs.append(current_log_prob)
             
-            # 참조 모델의 로그 확률
+            # 참조 모델의 로그 확률 (없으면 더미값)
             ref_log_prob = self.get_ref_model_log_prob(user_prompt, enhanced_prompt)
             ref_log_probs.append(ref_log_prob)
         
@@ -457,9 +515,13 @@ class QWENModel:
         clipped_ratio = torch.clamp(ratio, 1 - self.grpo_config.clip_ratio, 1 + self.grpo_config.clip_ratio)
         policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
         
-        # KL 발산 페널티
-        kl_div = (current_log_probs - ref_log_probs).mean()
-        kl_penalty = self.grpo_config.kl_coef * kl_div
+        # KL 발산 페널티 (Reference model이 없으면 스킵)
+        if self.ref_model is not None:
+            kl_div = (current_log_probs - ref_log_probs).mean()
+            kl_penalty = self.grpo_config.kl_coef * kl_div
+        else:
+            kl_div = torch.tensor(0.0, device=self.device)
+            kl_penalty = torch.tensor(0.0, device=self.device)
         
         # 총 손실 (엔트로피는 QWEN 자체에서 제공)
         total_loss = policy_loss + kl_penalty
@@ -501,3 +563,14 @@ class QWENModel:
             result = self.enhance_prompt(prompt)
             results.append(result)
         return results
+
+    def move_ref_model_to_device(self, device: str):
+        """Reference model을 특정 디바이스로 이동 (Accelerate 환경용)"""
+        if self.ref_model is not None:
+            try:
+                self.ref_model = self.ref_model.to(device)
+                logger.info(f"✅ Reference model을 {device}로 이동 완료")
+            except Exception as e:
+                logger.warning(f"⚠️ Reference model 이동 실패: {e}")
+        else:
+            logger.info("📍 Reference model이 없어서 이동하지 않음")
