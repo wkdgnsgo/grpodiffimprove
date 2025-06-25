@@ -34,12 +34,11 @@ class QWENGRPOConfig:
 
 class QWENModel:
 
-    def __init__(self, model_name = "Qwen/Qwen2-VL-7B-Instruct", device = "cuda", temperature = 0.7, grpo_config: QWENGRPOConfig = None, is_main_process: bool = True):
+    def __init__(self, model_name = "Qwen/Qwen2-VL-7B-Instruct", device = "cuda", temperature = 0.7, grpo_config: QWENGRPOConfig = None):
         self.model_name = model_name
         self.device = device
         self.temperature = temperature
-        self.grpo_config = grpo_config or QWENGRPOConfig()
-        self.is_main_process = is_main_process  # Accelerate 메인 프로세스 여부
+        self.grpo_config = grpo_config or QWENGRPOConfig()  # Accelerate 메인 프로세스 여부
 
         self._load_model()
         self._setup_prompt_template()
@@ -68,11 +67,13 @@ class QWENModel:
                 # device_map을 제거하여 Accelerate가 분산 관리하도록 함
             }
         else:
-            # 기본 GPU 사용 시 (단일 GPU 모드)
+            # 기본 GPU 사용 시 (단일 GPU 모드) - 메모리 극한 최적화
             model_kwargs = {
                 'torch_dtype': torch.float16,
                 'trust_remote_code': True,
                 'low_cpu_mem_usage': True,
+                'use_cache': False,  # 캐시 비활성화로 메모리 절약
+                'attn_implementation': 'flash_attention_2',  # Flash Attention 사용
                 # device_map 제거하여 단일 GPU 사용
             }
 
@@ -88,13 +89,18 @@ class QWENModel:
             self.model = self.model.to(self.device)
             logger.info(f"✅ 모델을 {self.device}로 이동")
         
-        # LoRA 설정 및 적용
+        # LoRA 설정 및 적용 - 균형잡힌 설정
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=16,  # LoRA rank (메모리와 성능의 균형)
-            lora_alpha=32,  # LoRA scaling parameter
+            r=16,  # LoRA rank 복원 (성능과 메모리 균형)
+            lora_alpha=32,  # LoRA scaling parameter 복원
             lora_dropout=0.1,
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # Qwen2-VL 타겟 모듈
+            target_modules=[
+                # Attention 모듈들
+                "q_proj", "v_proj", "k_proj", "o_proj",
+                # MLP 모듈들 (선택적)
+                "gate_proj", "up_proj", "down_proj"
+            ],
             bias="none",
             inference_mode=False,
         )
@@ -102,7 +108,19 @@ class QWENModel:
         # LoRA 어댑터 적용
         self.model = get_peft_model(self.model, lora_config)
         logger.info("✅ LoRA 어댑터 적용 완료")
-        logger.info(f"📊 학습 가능한 파라미터: {self.model.get_nb_trainable_parameters()}")
+        
+        # LoRA 파라미터 정보 출력
+        trainable_params = self.model.get_nb_trainable_parameters()
+        all_params = self.model.num_parameters()
+        trainable_percentage = 100 * trainable_params / all_params
+        
+        logger.info(f"📊 LoRA 파라미터 정보:")
+        logger.info(f"  - 학습 가능한 파라미터: {trainable_params:,}")
+        logger.info(f"  - 전체 파라미터: {all_params:,}")
+        logger.info(f"  - 학습 비율: {trainable_percentage:.2f}%")
+        logger.info(f"  - LoRA rank: {lora_config.r}")
+        logger.info(f"  - LoRA alpha: {lora_config.lora_alpha}")
+        logger.info(f"  - 타겟 모듈: {lora_config.target_modules}")
         
         # 메모리 최적화 설정
         if hasattr(self.model, 'gradient_checkpointing_enable'):
@@ -112,14 +130,15 @@ class QWENModel:
         if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             
-        # 생성 설정
+        # 생성 설정 - LoRA 최적화
         self.generation_config = GenerationConfig(
-            max_new_tokens=77,
+            max_new_tokens=30,  # 적절한 토큰 수로 복원
             temperature=self.temperature,
             top_p=0.9,
             do_sample=True,
             pad_token_id=self.tokenizer.pad_token_id,
-            eos_token_id=self.tokenizer.eos_token_id
+            eos_token_id=self.tokenizer.eos_token_id,
+            use_cache=False,  # 메모리 절약을 위해 캐시 비활성화 유지
         )
         
         logger.info("✅ QWEN 모델 로드 완료 (메모리 최적화 적용)")
@@ -156,21 +175,17 @@ class QWENModel:
         # Reference 모델은 항상 활성화 (KL penalty 필요)
         logger.info("🎯 Reference 모델 활성화 (KL penalty 계산용)")
         
-        # Reference 모델 생성 (메인 프로세스에서만)
-        if self.is_main_process:
-            logger.info("🔧 Reference 모델 생성 중...")
-            self.ref_model = copy.deepcopy(self.model)
-            self.ref_model.eval()
-            
-            # Reference 모델을 다른 GPU로 이동 (메모리 분산)
-            if torch.cuda.is_available() and torch.cuda.device_count() > 4:
-                self.ref_model = self.ref_model.to("cuda:4")
-                logger.info("✅ Reference 모델을 GPU 4번으로 이동")
-            else:
-                logger.info("✅ Reference 모델 생성 완료 (현재 디바이스)")
+        # Reference 모델을 CLIP GPU로 이동 (GPU 1) - 단일 GPU 모드
+        logger.info("🔧 Reference 모델 생성 중... (CLIP GPU로 이동)")
+        self.ref_model = copy.deepcopy(self.model)
+        self.ref_model.eval()
+        
+        # Reference 모델을 GPU 1 (CLIP GPU)로 이동
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            self.ref_model = self.ref_model.to("cuda:1")
+            logger.info("✅ Reference 모델을 GPU 1 (CLIP GPU)로 이동")
         else:
-            logger.info("🎯 서브 프로세스: Reference 모델 생성 건너뛰기")
-            self.ref_model = None
+            logger.info("✅ Reference 모델 생성 완료 (현재 디바이스)")
         
         # 옵티마이저 (LoRA 파라미터만 학습)
         # LoRA 파라미터만 학습하도록 필터링
@@ -465,13 +480,11 @@ class QWENModel:
         return enhanced_prompt, avg_log_prob
 
     def get_ref_model_log_prob(self, user_prompt: str, enhanced_prompt: str) -> torch.Tensor:
-        """참조 모델의 로그 확률 계산 (메모리 최적화 버전)"""
-        # Reference model이 없으면 더미 값 반환
+        """참조 모델의 로그 확률 계산 (단일 GPU 모드)"""
+        # Reference model이 없으면 더미 값 반환 (단일 GPU 모드에서는 항상 있어야 함)
         if self.ref_model is None:
-            if self.device == "accelerate":
-                return torch.tensor(0.0, dtype=torch.float16)  # Accelerate가 디바이스 관리
-            else:
-                return torch.tensor(0.0, device=self.device, dtype=torch.float16)
+            logger.warning("⚠️ Reference 모델이 없습니다!")
+            return torch.tensor(0.0, device=self.device, dtype=torch.float16)
         
         # VLM에 입력할 메시지 구성
         messages = [
@@ -489,8 +502,9 @@ class QWENModel:
         # 전체 시퀀스 (프롬프트 + 생성된 텍스트)
         full_text = prompt + enhanced_prompt
         
-        # Reference model의 디바이스 확인
+        # Reference model의 디바이스 확인 (GPU 1에 있음)
         ref_device = next(self.ref_model.parameters()).device
+        logger.info(f"🔍 Reference 모델 디바이스: {ref_device}")
         
         # 토크나이징 (Reference model 디바이스에 맞춤)
         inputs = self.tokenizer(
@@ -536,14 +550,11 @@ class QWENModel:
             old_log_probs.append(exp['log_prob'])
             rewards.append(exp['reward'])
         
-        # 텐서로 변환
+        # 텐서로 변환 (단일 GPU 모드)
         old_log_probs = torch.stack(old_log_probs).half()
-        if self.device == "accelerate":
-            rewards = torch.tensor(rewards, dtype=torch.float16)  # Accelerate가 디바이스 관리
-        else:
-            rewards = torch.tensor(rewards, device=self.device, dtype=torch.float16)
+        rewards = torch.tensor(rewards, device=self.device, dtype=torch.float16)
         
-        # Group-relative advantage 사용 (main.py에서 계산됨)
+        # Group-relative advantage 사용 (main.py에서 계산됨) - 단일 GPU 모드
         advantages = []
         for exp in experiences:
             if 'group_advantage' in exp:
@@ -552,10 +563,7 @@ class QWENModel:
                 # fallback: 기존 방식
                 advantages.append(exp['reward'] - rewards.mean().item())
         
-        if self.device == "accelerate":
-            advantages = torch.tensor(advantages, dtype=torch.float16)
-        else:
-            advantages = torch.tensor(advantages, device=self.device, dtype=torch.float16)
+        advantages = torch.tensor(advantages, device=self.device, dtype=torch.float16)
         
         baseline = rewards.mean()  # 로깅용
         
@@ -582,17 +590,13 @@ class QWENModel:
         clipped_ratio = torch.clamp(ratio, 1 - self.grpo_config.clip_ratio, 1 + self.grpo_config.clip_ratio)
         policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
         
-        # KL 발산 페널티 (Reference model이 없으면 스킵)
+        # KL 발산 페널티 (단일 GPU 모드 - Reference model 항상 있음)
         if self.ref_model is not None:
             kl_div = (current_log_probs - ref_log_probs).mean()
             kl_penalty = self.grpo_config.kl_coef * kl_div
         else:
-            if self.device == "accelerate":
-                kl_div = torch.tensor(0.0)  # Accelerate가 디바이스 관리
-                kl_penalty = torch.tensor(0.0)
-            else:
-                kl_div = torch.tensor(0.0, device=self.device)
-                kl_penalty = torch.tensor(0.0, device=self.device)
+            kl_div = torch.tensor(0.0, device=self.device)
+            kl_penalty = torch.tensor(0.0, device=self.device)
         
         # 총 손실 (엔트로피는 QWEN 자체에서 제공)
         total_loss = policy_loss + kl_penalty

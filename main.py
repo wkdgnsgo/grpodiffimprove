@@ -99,17 +99,16 @@ class SimpleGRPOTrainer:
         """각 GPU별 모델 초기화 - 메모리 최적화"""
         logger.info("🔧 모델들 초기화 중... (메모리 최적화)")
         
-        # GPU 0: QWEN LoRA 모델만
+        # GPU 0: QWEN LoRA 모델만 - 더 작은 모델 사용
         qwen_device = "cuda:0" if self.use_gpu else "cpu"
-        logger.info(f"🧠 {qwen_device}: QWEN LoRA 모델 로딩...")
+        logger.info(f"🧠 {qwen_device}: QWEN LoRA 모델 로딩... (더 작은 모델)")
         self.qwen_model = QWENModel(
-            model_name="Qwen/Qwen2-VL-7B-Instruct",
+            model_name="Qwen/Qwen2-VL-2B-Instruct",  # 7B → 2B로 변경
             device=qwen_device,
             temperature=0.7,
-            grpo_config=self.config,
-            is_main_process=True
+            grpo_config=self.config
         )
-        logger.info(f"✅ QWEN 모델 로드 완료 ({qwen_device})")
+        logger.info(f"✅ QWEN 2B 모델 로드 완료 ({qwen_device})")
         
         # GPU 1: CLIP 리워드 모델만
         clip_device = "cuda:1" if self.use_gpu and torch.cuda.device_count() > 1 else "cuda:0" if self.use_gpu else "cpu"
@@ -125,12 +124,20 @@ class SimpleGRPOTrainer:
         self.sd_device = sd_device
         logger.info(f"✅ SD3 파이프라인 로드 완료 ({sd_device})")
         
+        # GPU 메모리 정리
+        if self.use_gpu:
+            for i in range(torch.cuda.device_count()):
+                with torch.cuda.device(i):
+                    torch.cuda.empty_cache()
+            logger.info("🧹 초기화 후 GPU 메모리 정리 완료")
+        
         logger.info("🎯 모든 모델 초기화 완료!")
         logger.info("📋 GPU 할당:")
-        logger.info(f"  GPU 0: QWEN LoRA 모델 ({qwen_device})")
-        logger.info(f"  GPU 1: CLIP 리워드 모델 ({clip_device})")
+        logger.info(f"  GPU 0: QWEN 2B LoRA 모델 ({qwen_device})")
+        logger.info(f"  GPU 1: CLIP 리워드 모델 + Reference 모델 ({clip_device})")
         logger.info(f"  GPU 2: SD3 이미지 생성 ({sd_device})")
         logger.info("🔄 이미지는 GPU 2에서 생성 후 GPU 1로 이동하여 리워드 계산")
+        logger.info("🔄 Reference 모델은 GPU 1에서 KL penalty 계산")
         
     def generate_enhanced_prompts(self, user_prompt: str, num_rollouts: int) -> List[tuple]:
         """향상된 프롬프트 생성 (GPU 0에서 실행)"""
@@ -474,13 +481,13 @@ def main():
     logger.info("  GPU 2: Stable Diffusion 3 Image Generation")
     logger.info("=" * 60)
     
-    # 설정 - 메모리 최적화
+    # 설정 - LoRA 최적화
     config = QWENGRPOConfig(
-        learning_rate=5e-7,
-        batch_size=1,  # 배치 크기 1로 줄임 (메모리 절약)
-        num_rollouts=1,  # 롤아웃 수 1로 줄임 (메모리 절약)
+        learning_rate=1e-4,  # LoRA에 적합한 학습률로 증가
+        batch_size=2,  # 배치 크기 약간 증가
+        num_rollouts=2,  # 롤아웃 수 증가
         max_prompt_length=77,
-        max_new_tokens=20,  # 토큰 수 줄임 (메모리 절약)
+        max_new_tokens=25,  # 토큰 수 약간 증가
         temperature=1.2,
         top_p=0.9,
         top_k=100,
