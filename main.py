@@ -85,8 +85,8 @@ class SimpleGRPOTrainer:
         # 로깅 디렉토리 설정
         self.log_dir = config.log_dir
         os.makedirs(self.log_dir, exist_ok=True)
-        os.makedirs(os.path.join(self.log_dir, "images"), exist_ok=True)
-        os.makedirs(os.path.join(self.log_dir, "plots"), exist_ok=True)
+        # episodes 폴더만 생성 (이미지와 플롯 모두 여기에 저장)
+        os.makedirs(os.path.join(self.log_dir, "episodes"), exist_ok=True)
         
         # 학습 메트릭 추적
         self.training_metrics = {
@@ -665,7 +665,7 @@ class SimpleGRPOTrainer:
             # 원본 프롬프트별 폴더 생성 (안전한 폴더명으로 변환)
             safe_prompt = self.make_safe_filename(user_prompt)
             prompt_dir = os.path.join(self.log_dir, "episodes", safe_prompt)
-            os.makedirs(prompt_dir, exist_ok=True)
+            os.makedirs(prompt_dir, exist_ok=True)  # 프롬프트별 하위 폴더는 필요시에만 생성
             
             # 1. 원본 프롬프트로 이미지 생성 (비교용)
             logger.info(f"🔍 원본 프롬프트로 비교 이미지 생성: '{user_prompt}'")
@@ -758,9 +758,8 @@ class SimpleGRPOTrainer:
     def plot_training_metrics(self, epoch: int):
         """학습 메트릭 플롯 생성 - episodes/ 폴더에 지속 업데이트"""
         try:
-            # episodes 폴더 생성
+            # episodes 폴더 (이미 __init__에서 생성됨)
             episodes_dir = os.path.join(self.log_dir, "episodes")
-            os.makedirs(episodes_dir, exist_ok=True)
             
             if not self.training_metrics['epoch_rewards']:
                 return
