@@ -96,10 +96,10 @@ class SimpleGRPOTrainer:
         self._init_models()
         
     def _init_models(self):
-        """각 GPU별 모델 초기화"""
-        logger.info("🔧 모델들 초기화 중...")
+        """각 GPU별 모델 초기화 - 메모리 최적화"""
+        logger.info("🔧 모델들 초기화 중... (메모리 최적화)")
         
-        # GPU 0: QWEN LoRA 모델
+        # GPU 0: QWEN LoRA 모델만
         qwen_device = "cuda:0" if self.use_gpu else "cpu"
         logger.info(f"🧠 {qwen_device}: QWEN LoRA 모델 로딩...")
         self.qwen_model = QWENModel(
@@ -111,19 +111,26 @@ class SimpleGRPOTrainer:
         )
         logger.info(f"✅ QWEN 모델 로드 완료 ({qwen_device})")
         
-        # GPU 1: CLIP 리워드 모델  
+        # GPU 1: CLIP 리워드 모델만
         clip_device = "cuda:1" if self.use_gpu and torch.cuda.device_count() > 1 else "cuda:0" if self.use_gpu else "cpu"
         logger.info(f"🎯 {clip_device}: CLIP 리워드 모델 로딩...")
         self.reward_model = CLIPReward(device=clip_device)
+        self.clip_device = clip_device
         logger.info(f"✅ CLIP 모델 로드 완료 ({clip_device})")
         
-        # GPU 2: Stable Diffusion 3
+        # GPU 2: Stable Diffusion 3만 (이미지 생성 전용)
         sd_device = "cuda:2" if self.use_gpu and torch.cuda.device_count() > 2 else "cuda:0" if self.use_gpu else "cpu"
-        logger.info(f"🎨 {sd_device}: SD3 파이프라인 로딩...")
+        logger.info(f"🎨 {sd_device}: SD3 파이프라인 로딩... (이미지 생성 전용)")
         self.sd_pipeline = load_stable_diffusion_pipeline(device=sd_device)
+        self.sd_device = sd_device
         logger.info(f"✅ SD3 파이프라인 로드 완료 ({sd_device})")
         
         logger.info("🎯 모든 모델 초기화 완료!")
+        logger.info("📋 GPU 할당:")
+        logger.info(f"  GPU 0: QWEN LoRA 모델 ({qwen_device})")
+        logger.info(f"  GPU 1: CLIP 리워드 모델 ({clip_device})")
+        logger.info(f"  GPU 2: SD3 이미지 생성 ({sd_device})")
+        logger.info("🔄 이미지는 GPU 2에서 생성 후 GPU 1로 이동하여 리워드 계산")
         
     def generate_enhanced_prompts(self, user_prompt: str, num_rollouts: int) -> List[tuple]:
         """향상된 프롬프트 생성 (GPU 0에서 실행)"""
@@ -227,21 +234,26 @@ class SimpleGRPOTrainer:
         return rewards
     
     def calculate_rewards_batch(self, user_prompt: str, enhanced_prompts: List[str], images: List) -> List[float]:
-        """배치 리워드 계산 (GPU 1에서 실행) - original user prompt 사용"""
+        """배치 리워드 계산 - 이미지를 CLIP GPU로 이동"""
         logger.info(f"🎯 배치 리워드 계산 ({len(images)}개) - Original User Prompt 사용")
         logger.info(f"📝 사용된 Original Prompt: '{user_prompt}'")
+        logger.info(f"🔄 이미지를 GPU {self.sd_device} → {self.clip_device}로 이동")
         
         try:
+            # 이미지들은 이미 PIL Image 형태이므로 직접 CLIP으로 전달 가능
+            # (PIL Image는 CPU 메모리에 있으므로 GPU 간 이동 불필요)
+            
             # CLIP 배치 처리 사용 - original user prompt로 계산
             rewards = self.reward_model.calculate_batch_rewards(
                 user_prompt,  # ⭐ 중요: original user prompt 사용 (enhanced 아님)
                 enhanced_prompts,
-                images
+                images  # PIL Images - CLIP에서 자동으로 적절한 GPU로 처리
             )
             
             avg_reward = sum(rewards) / len(rewards) if rewards else 0.0
             logger.info(f"✅ 배치 리워드 계산 완료 - 평균: {avg_reward:.4f}")
             logger.info(f"🔍 CLIP 유사도는 Original User Prompt '{user_prompt}'와 생성된 이미지 간 계산됨")
+            logger.info(f"📊 이미지 처리: SD3 GPU {self.sd_device} → CLIP GPU {self.clip_device}")
             
             return rewards
             
@@ -462,13 +474,13 @@ def main():
     logger.info("  GPU 2: Stable Diffusion 3 Image Generation")
     logger.info("=" * 60)
     
-    # 설정
+    # 설정 - 메모리 최적화
     config = QWENGRPOConfig(
         learning_rate=5e-7,
-        batch_size=2,
-        num_rollouts=2,
+        batch_size=1,  # 배치 크기 1로 줄임 (메모리 절약)
+        num_rollouts=1,  # 롤아웃 수 1로 줄임 (메모리 절약)
         max_prompt_length=77,
-        max_new_tokens=25,
+        max_new_tokens=20,  # 토큰 수 줄임 (메모리 절약)
         temperature=1.2,
         top_p=0.9,
         top_k=100,

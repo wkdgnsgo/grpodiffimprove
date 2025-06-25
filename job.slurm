@@ -17,6 +17,10 @@
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export TORCH_DISTRIBUTED_DISABLE=1
 
+# CUDA 메모리 최적화
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export CUDA_LAUNCH_BLOCKING=1
+
 # 기존 분산 처리 환경 변수들 (주석 처리)
 # export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 # export WORLD_SIZE=$(($SLURM_NNODES * SLURM_NTASKS_PER_NODE))
