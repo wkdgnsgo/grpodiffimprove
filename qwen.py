@@ -44,6 +44,10 @@ class QWENGRPOConfig:
     use_stochastic_rounding: bool = True  # 확률적 반올림 (시뮬레이션)
     logits_clip_range: float = 20.0  # logits 클리핑 범위 (더 보수적으로)
     stable_log_prob_min: float = -50.0  # 안전한 로그 확률 최소값
+    
+    # 로그 제어 설정
+    verbose_logging: bool = False  # 상세 로그 출력 여부
+    log_nan_inf_warnings: bool = False  # NaN/Inf 경고 로그 출력 여부
 
 class QWENModel:
 
@@ -233,16 +237,39 @@ class QWENModel:
         total_trainable_params = 0
         
         logger.info("🔍 LoRA 학습 가능한 파라미터 분석:")
+        
+        # 레이어별 그룹화하여 요약
+        layer_groups = {}
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 trainable_params.append(param)
                 param_count = param.numel()
                 total_trainable_params += param_count
-                logger.info(f"  📌 {name}: {param_count:,} 파라미터 (shape: {param.shape})")
+                
+                # 레이어 그룹 분류 (더 간단하게)
+                if 'lora_A' in name:
+                    layer_type = 'LoRA_A'
+                elif 'lora_B' in name:
+                    layer_type = 'LoRA_B'
+                elif 'bias' in name:
+                    layer_type = 'Bias'
+                elif 'embed' in name:
+                    layer_type = 'Embedding'
+                else:
+                    layer_type = 'Other'
+                
+                if layer_type not in layer_groups:
+                    layer_groups[layer_type] = {'count': 0, 'params': 0}
+                layer_groups[layer_type]['count'] += 1
+                layer_groups[layer_type]['params'] += param_count
         
-        logger.info(f"📊 LoRA 학습 파라미터 총계:")
-        logger.info(f"  - 학습 가능한 레이어 수: {len(trainable_params)}")
-        logger.info(f"  - 총 학습 파라미터 수: {total_trainable_params:,}")
+        # 요약 정보만 출력
+        logger.info(f"📊 LoRA 파라미터 요약:")
+        for layer_type, info in layer_groups.items():
+            logger.info(f"  - {layer_type}: {info['count']}개 레이어, {info['params']:,} 파라미터")
+        
+        logger.info(f"  - 총 학습 가능한 레이어: {len(trainable_params)}개")
+        logger.info(f"  - 총 학습 파라미터: {total_trainable_params:,}개")
         
         self.grpo_optimizer = torch.optim.AdamW(
             trainable_params, 
@@ -526,18 +553,24 @@ class QWENModel:
                 try:
                     token_id = outputs.sequences[0][inputs['input_ids'].shape[1] + i]
                     
-                    # 안전한 log_softmax 계산
-                    # score에 inf, nan이 있는지 확인
+                    # EasyR1 스타일 안전한 log_softmax 계산 - 예방적 클리핑 우선
+                    # 예방적 클리핑 (EasyR1 스타일) - 모든 score에 적용
+                    score = torch.clamp(score, min=-self.grpo_config.logits_clip_range, max=self.grpo_config.logits_clip_range)
+                    
+                    # NaN/Inf 검사 (클리핑 후에도 발생할 수 있음)
                     if torch.isnan(score).any() or torch.isinf(score).any():
-                        logger.warning(f"⚠️ Score에 nan/inf 발견, 클리핑 적용")
-                        score = torch.clamp(score, min=-100, max=100)
+                        if self.grpo_config.log_nan_inf_warnings:
+                            logger.warning(f"⚠️ 클리핑 후에도 Score에 nan/inf 발견 (토큰 {i})")
+                        # 강제로 안전한 값으로 대체
+                        score = torch.full_like(score, 0.0)
                     
                     # log_softmax 계산
                     log_softmax_scores = F.log_softmax(score, dim=-1)
                     
                     # 결과 검증
                     if torch.isnan(log_softmax_scores).any() or torch.isinf(log_softmax_scores).any():
-                        logger.warning(f"⚠️ Log softmax에 nan/inf 발견, 안전한 값으로 대체")
+                        if self.grpo_config.log_nan_inf_warnings:
+                            logger.warning(f"⚠️ Log softmax에 nan/inf 발견, 안전한 값으로 대체")
                         log_prob = torch.tensor(-10.0, device=score.device)  # 안전한 기본값
                     else:
                         log_prob = log_softmax_scores[0, token_id]
@@ -715,7 +748,7 @@ class QWENModel:
         
         # Reference model의 디바이스 확인 (GPU 1에 있음)
         ref_device = next(self.ref_model.parameters()).device
-        logger.info(f"🔍 Reference 모델 디바이스: {ref_device}")
+        logger.debug(f"🔍 Reference 모델 디바이스: {ref_device}")
         
         # 토크나이징 (Reference model 디바이스에 맞춤)
         inputs = self.tokenizer(
