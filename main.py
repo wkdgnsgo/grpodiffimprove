@@ -557,23 +557,19 @@ class SimpleGRPOTrainer:
         logger.info(f"\n📊 에포크 {epoch} 총 수집된 경험: {len(all_experiences)}개")
         return all_experiences
     
-    def update_policy(self, experiences: List[Dict]) -> Dict:
-        """Group-relative 정책 업데이트 (GPU 0에서 실행)"""
-        logger.info(f"🔄 Group-relative 정책 업데이트 ({len(experiences)}개 경험)")
+    def update_policy(self, experiences: List[Dict], epoch: int) -> Dict:
+        """CartPole GRPO 호환 정책 업데이트"""
+        logger.info(f"🔄 CartPole GRPO 호환 정책 업데이트 ({len(experiences)}개 경험)")
         
-        # Group-relative baseline 계산
-        group_baseline_metrics = self.calculate_group_relative_baseline(experiences)
+        # 1. Reference 모델 업데이트 (매 iteration마다)
+        if epoch % self.config.update_ref_model_freq == 0:
+            logger.info(f"🔄 에포크 {epoch}: Reference 모델 업데이트")
+            self.qwen_model.update_reference_model()
         
-        # 향상된 경험 데이터로 정책 업데이트
-        enhanced_experiences = self.apply_group_relative_advantages(experiences, group_baseline_metrics)
+        # 2. 다중 에포크 업데이트 (CartPole GRPO 방식)
+        metrics = self.qwen_model.update_grpo_policy_multiple_epochs(experiences)
         
-        # QWEN 모델 업데이트
-        metrics = self.qwen_model.update_grpo_policy(enhanced_experiences)
-        
-        # Group-relative 메트릭 추가
-        metrics.update(group_baseline_metrics)
-        
-        logger.info(f"✅ Group-relative 정책 업데이트 완료")
+        logger.info(f"✅ CartPole GRPO 호환 업데이트 완료")
         return metrics
     
     def calculate_group_relative_baseline(self, experiences: List[Dict]) -> Dict:
@@ -866,7 +862,10 @@ class SimpleGRPOTrainer:
         
         if metrics:
             for key, value in metrics.items():
-                logger.info(f"  📊 {key}: {value:.4f}")
+                if isinstance(value, (int, float)):
+                    logger.info(f"  📊 {key}: {value:.4f}")
+                else:
+                    logger.info(f"  📊 {key}: {value}")
         
         # CSV 로그 저장
         csv_path = os.path.join(self.log_dir, "training_log.csv")
@@ -902,7 +901,7 @@ class SimpleGRPOTrainer:
                 # 정책 업데이트 (그라디언트 업데이트 포함)
                 try:
                     logger.info(f"🔄 에포크 {epoch + 1}: 정책 업데이트 시작...")
-                    metrics = self.update_policy(experiences)
+                    metrics = self.update_policy(experiences, epoch + 1)
                     logger.info(f"✅ 에포크 {epoch + 1}: 정책 업데이트 완료")
                     
                 except Exception as update_error:

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QWENGRPOConfig:
-    """QWEN GRPO 통합 설정 (메모리 최적화)"""
+    """QWEN GRPO 통합 설정 (CartPole GRPO 호환)"""
     learning_rate: float = 2e-4  # LoRA는 더 높은 학습률 사용 가능
     batch_size: int = 2  # 메모리 절약을 위해 배치 크기 감소 (8 → 2)
     num_rollouts: int = 2  # 메모리 절약을 위해 롤아웃 수 감소 (6 → 2)
@@ -27,6 +27,12 @@ class QWENGRPOConfig:
     entropy_coef: float = 0.02
     save_images: bool = True
     log_dir: str = "grpo_results"
+    
+    # CartPole GRPO 호환 추가 설정
+    gamma: float = 0.995  # 할인 팩터 (VLM은 CartPole보다 높게)
+    grpo_epochs: int = 10  # 다중 에포크 업데이트
+    update_ref_model_freq: int = 1  # Reference 모델 업데이트 빈도
+    epsilon_std: float = 1e-8  # 정규화 안정성
 
 class QWENModel:
 
@@ -105,25 +111,40 @@ class QWENModel:
         self.model = get_peft_model(self.model, lora_config)
         logger.info("✅ LoRA 어댑터 적용 완료")
         
-        # LoRA 파라미터 정보 출력
+        # LoRA 파라미터 정보 출력 (상세 분석)
         try:
-            # get_nb_trainable_parameters()가 튜플을 반환할 수 있음
-            trainable_result = self.model.get_nb_trainable_parameters()
-            if isinstance(trainable_result, tuple):
-                trainable_params = trainable_result[0]  # 첫 번째 값이 학습 가능한 파라미터 수
-            else:
-                trainable_params = trainable_result
+            # 전체 파라미터 수 계산
+            total_params = sum(p.numel() for p in self.model.parameters())
             
-            all_params = self.model.num_parameters()
-            trainable_percentage = 100 * trainable_params / all_params
+            # 학습 가능한 파라미터 수 계산
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             
-            logger.info(f"📊 LoRA 파라미터 정보:")
+            # 각 LoRA 레이어별 파라미터 수 분석
+            lora_details = {}
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and ('lora' in name.lower() or 'adapter' in name.lower()):
+                    module_name = name.split('.')[0] if '.' in name else name
+                    if module_name not in lora_details:
+                        lora_details[module_name] = 0
+                    lora_details[module_name] += param.numel()
+            
+            trainable_percentage = 100 * trainable_params / total_params if total_params > 0 else 0
+            
+            logger.info(f"📊 LoRA 파라미터 상세 정보:")
+            logger.info(f"  - 전체 모델 파라미터: {total_params:,}")
             logger.info(f"  - 학습 가능한 파라미터: {trainable_params:,}")
-            logger.info(f"  - 전체 파라미터: {all_params:,}")
-            logger.info(f"  - 학습 비율: {trainable_percentage:.2f}%")
-            logger.info(f"  - LoRA rank: {lora_config.r}")
-            logger.info(f"  - LoRA alpha: {lora_config.lora_alpha}")
-            logger.info(f"  - 타겟 모듈: {lora_config.target_modules}")
+            logger.info(f"  - 학습 비율: {trainable_percentage:.4f}%")
+            logger.info(f"  - LoRA 설정:")
+            logger.info(f"    * Rank (r): {lora_config.r}")
+            logger.info(f"    * Alpha: {lora_config.lora_alpha}")
+            logger.info(f"    * Dropout: {lora_config.lora_dropout}")
+            logger.info(f"    * 타겟 모듈: {lora_config.target_modules}")
+            
+            if lora_details:
+                logger.info(f"  - LoRA 레이어별 파라미터:")
+                for module, count in lora_details.items():
+                    logger.info(f"    * {module}: {count:,} 파라미터")
+                    
         except Exception as e:
             logger.warning(f"⚠️ LoRA 파라미터 정보 출력 실패: {e}")
             logger.info("✅ LoRA 어댑터는 정상적으로 적용됨")
@@ -198,11 +219,19 @@ class QWENModel:
         # 옵티마이저 (LoRA 파라미터만 학습)
         # LoRA 파라미터만 학습하도록 필터링
         trainable_params = []
+        total_trainable_params = 0
+        
+        logger.info("🔍 LoRA 학습 가능한 파라미터 분석:")
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 trainable_params.append(param)
+                param_count = param.numel()
+                total_trainable_params += param_count
+                logger.info(f"  📌 {name}: {param_count:,} 파라미터 (shape: {param.shape})")
         
-        logger.info(f"📊 LoRA 학습 파라미터 개수: {len(trainable_params)}")
+        logger.info(f"📊 LoRA 학습 파라미터 총계:")
+        logger.info(f"  - 학습 가능한 레이어 수: {len(trainable_params)}")
+        logger.info(f"  - 총 학습 파라미터 수: {total_trainable_params:,}")
         
         self.grpo_optimizer = torch.optim.AdamW(
             trainable_params, 
@@ -469,26 +498,73 @@ class QWENModel:
         # 후처리
         enhanced_prompt = self._post_process_output(generated_text)
         
-        # 로그 확률 계산 (생성된 토큰들의 평균 로그 확률)
+        # 로그 확률 계산 (생성된 토큰들의 총 로그 확률) - GRPO 정확한 계산
         if hasattr(outputs, 'scores') and outputs.scores:
             log_probs = []
             for i, score in enumerate(outputs.scores):
-                token_id = outputs.sequences[0][inputs['input_ids'].shape[1] + i]
-                log_prob = F.log_softmax(score, dim=-1)[0, token_id]
-                log_probs.append(log_prob)
+                try:
+                    token_id = outputs.sequences[0][inputs['input_ids'].shape[1] + i]
+                    
+                    # 안전한 log_softmax 계산
+                    # score에 inf, nan이 있는지 확인
+                    if torch.isnan(score).any() or torch.isinf(score).any():
+                        logger.warning(f"⚠️ Score에 nan/inf 발견, 클리핑 적용")
+                        score = torch.clamp(score, min=-100, max=100)
+                    
+                    # log_softmax 계산
+                    log_softmax_scores = F.log_softmax(score, dim=-1)
+                    
+                    # 결과 검증
+                    if torch.isnan(log_softmax_scores).any() or torch.isinf(log_softmax_scores).any():
+                        logger.warning(f"⚠️ Log softmax에 nan/inf 발견, 안전한 값으로 대체")
+                        log_prob = torch.tensor(-10.0, device=score.device)  # 안전한 기본값
+                    else:
+                        log_prob = log_softmax_scores[0, token_id]
+                        
+                        # 추가 안전성 검사
+                        if torch.isnan(log_prob) or torch.isinf(log_prob):
+                            log_prob = torch.tensor(-10.0, device=score.device)
+                    
+                    log_probs.append(log_prob)
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ 로그 확률 계산 오류: {e}, 기본값 사용")
+                    if self.device == "accelerate":
+                        log_probs.append(torch.tensor(-10.0))
+                    else:
+                        log_probs.append(torch.tensor(-10.0, device=self.device))
             
-            avg_log_prob = torch.stack(log_probs).mean()
-        else:
-            # fallback: 더미 로그 확률
-            if self.device == "accelerate":
-                avg_log_prob = torch.tensor(0.0)  # Accelerate가 디바이스 관리
+            if log_probs:
+                # GRPO에서는 모든 토큰의 로그 확률 합을 사용 (평균이 아님)
+                total_log_prob = torch.stack(log_probs).sum()
+                
+                # 최종 안전성 검사
+                if torch.isnan(total_log_prob) or torch.isinf(total_log_prob):
+                    logger.warning("⚠️ 총 로그 확률에 nan/inf 발견, 안전한 값으로 대체")
+                    if self.device == "accelerate":
+                        total_log_prob = torch.tensor(-10.0)
+                    else:
+                        total_log_prob = torch.tensor(-10.0, device=self.device)
+                        
+                logger.debug(f"🔍 Generation: {len(log_probs)} tokens, total_log_prob={total_log_prob:.4f}")
+                avg_log_prob = total_log_prob  # 변수명 유지 (하위 호환성)
             else:
-                avg_log_prob = torch.tensor(0.0, device=self.device)
+                # 로그 확률 계산 실패 시 기본값
+                if self.device == "accelerate":
+                    avg_log_prob = torch.tensor(-10.0)
+                else:
+                    avg_log_prob = torch.tensor(-10.0, device=self.device)
+        else:
+            # fallback: 안전한 기본 로그 확률
+            if self.device == "accelerate":
+                avg_log_prob = torch.tensor(-10.0)  # Accelerate가 디바이스 관리
+            else:
+                avg_log_prob = torch.tensor(-10.0, device=self.device)
         
         return enhanced_prompt, avg_log_prob
 
     def calculate_log_prob_for_grpo(self, user_prompt: str, enhanced_prompt: str) -> torch.Tensor:
-        """현재 모델의 로그 확률 계산 (gradient 계산 필요)"""
+        """현재 모델의 로그 확률 계산 (gradient 계산 필요) - GRPO 정확한 구현"""
         # VLM에 입력할 메시지 구성
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -502,10 +578,19 @@ class QWENModel:
             add_generation_prompt=True
         )
         
+        # 프롬프트만 토크나이징 (생성 시작점 확인용)
+        prompt_inputs = self.tokenizer(
+            prompt, 
+            return_tensors="pt", 
+            padding=True, 
+            truncation=True
+        )
+        prompt_length = prompt_inputs['input_ids'].shape[1]
+        
         # 전체 시퀀스 (프롬프트 + 생성된 텍스트)
         full_text = prompt + enhanced_prompt
         
-        # 토크나이징
+        # 전체 시퀀스 토크나이징
         inputs = self.tokenizer(
             full_text, 
             return_tensors="pt", 
@@ -524,17 +609,52 @@ class QWENModel:
             attention_mask=inputs['attention_mask']
         )
         
-        # 생성된 부분의 로그 확률만 계산
-        prompt_length = len(self.tokenizer.encode(prompt))
-        generated_logits = outputs.logits[0, prompt_length-1:-1]  # 생성된 부분만
-        generated_tokens = inputs['input_ids'][0, prompt_length:]
-        
-        # 로그 확률 계산 (gradient 유지)
-        log_probs = F.log_softmax(generated_logits, dim=-1)
-        token_log_probs = log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
-        
-        # 평균 로그 확률 반환 (gradient 유지)
-        return token_log_probs.mean()
+        # 생성된 부분의 로그 확률만 계산 - GRPO 정확한 방식
+        try:
+            # 생성된 토큰들 (프롬프트 이후 부분)
+            generated_tokens = inputs['input_ids'][0, prompt_length:]
+            
+            if len(generated_tokens) == 0:
+                logger.warning("⚠️ 생성된 토큰이 없음, 기본값 반환")
+                return torch.tensor(-10.0, device=self.device, requires_grad=True)
+            
+            # 생성된 토큰에 대응하는 logits (shift by 1)
+            # logits[i]는 token[i+1]을 예측하므로, prompt_length-1부터 시작
+            generated_logits = outputs.logits[0, prompt_length-1:prompt_length-1+len(generated_tokens)]
+            
+            # 안전성 검사
+            if torch.isnan(generated_logits).any() or torch.isinf(generated_logits).any():
+                logger.warning("⚠️ Generated logits에 nan/inf 발견, 클리핑 적용")
+                generated_logits = torch.clamp(generated_logits, min=-100, max=100)
+            
+            # 각 토큰에 대한 로그 확률 계산 (gradient 유지)
+            log_probs = F.log_softmax(generated_logits, dim=-1)
+            
+            # log_softmax 결과 검증
+            if torch.isnan(log_probs).any() or torch.isinf(log_probs).any():
+                logger.warning("⚠️ Log probabilities에 nan/inf 발견, 안전한 값으로 대체")
+                return torch.tensor(-10.0, device=generated_logits.device, requires_grad=True)
+            
+            # 각 생성된 토큰의 로그 확률 추출
+            token_log_probs = log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
+            
+            # GRPO에서는 모든 토큰의 로그 확률 합을 사용 (평균이 아님)
+            total_log_prob = token_log_probs.sum()
+            
+            # 최종 결과 검증
+            if torch.isnan(total_log_prob) or torch.isinf(total_log_prob):
+                logger.warning("⚠️ 총 로그 확률에 nan/inf 발견, 안전한 값으로 대체")
+                return torch.tensor(-10.0, device=generated_logits.device, requires_grad=True)
+            
+            logger.debug(f"🔍 Current model: {len(generated_tokens)} tokens, total_log_prob={total_log_prob:.4f}")
+            return total_log_prob
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 로그 확률 계산 중 오류: {e}, 안전한 기본값 반환")
+            if self.device == "accelerate":
+                return torch.tensor(-10.0, requires_grad=True)
+            else:
+                return torch.tensor(-10.0, device=self.device, requires_grad=True)
 
     def get_ref_model_log_prob(self, user_prompt: str, enhanced_prompt: str) -> torch.Tensor:
         """참조 모델의 로그 확률 계산 (단일 GPU 모드)"""
@@ -578,20 +698,78 @@ class QWENModel:
                 attention_mask=inputs['attention_mask']
             )
             
-            # 생성된 부분의 로그 확률만 계산
-            prompt_length = len(self.tokenizer.encode(prompt))
-            generated_logits = outputs.logits[0, prompt_length-1:-1]  # 생성된 부분만
+            # 생성된 부분의 로그 확률만 계산 - GRPO 정확한 방식
+            # 프롬프트 길이 계산 (current model과 동일한 방식)
+            prompt_inputs = self.tokenizer(prompt, return_tensors="pt")
+            prompt_length = prompt_inputs['input_ids'].shape[1]
+            
+            # 생성된 토큰들 (프롬프트 이후 부분)
             generated_tokens = inputs['input_ids'][0, prompt_length:]
             
+            if len(generated_tokens) == 0:
+                logger.warning("⚠️ Reference model: 생성된 토큰이 없음")
+                return torch.tensor(-10.0, device=self.device)
+            
+            # 생성된 토큰에 대응하는 logits (shift by 1)
+            generated_logits = outputs.logits[0, prompt_length-1:prompt_length-1+len(generated_tokens)]
+            
+            # 안전한 로그 확률 계산
+            if torch.isnan(generated_logits).any() or torch.isinf(generated_logits).any():
+                logger.warning("⚠️ Reference model logits에 nan/inf 발견, 클리핑 적용")
+                generated_logits = torch.clamp(generated_logits, min=-100, max=100)
+            
             log_probs = F.log_softmax(generated_logits, dim=-1)
+            
+            # log_softmax 결과 검증
+            if torch.isnan(log_probs).any() or torch.isinf(log_probs).any():
+                logger.warning("⚠️ Reference log probabilities에 nan/inf 발견, 안전한 값으로 대체")
+                return torch.tensor(-10.0, device=self.device)
+            
+            # 각 생성된 토큰의 로그 확률 추출
             token_log_probs = log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
             
+            # GRPO에서는 모든 토큰의 로그 확률 합을 사용 (평균이 아님)
+            total_log_prob = token_log_probs.sum()
+            
+            # 최종 결과 검증
+            if torch.isnan(total_log_prob) or torch.isinf(total_log_prob):
+                logger.warning("⚠️ Reference 총 로그 확률에 nan/inf 발견, 안전한 값으로 대체")
+                return torch.tensor(-10.0, device=self.device)
+            
             # 결과를 main model device로 이동
-            result = token_log_probs.mean().to(self.device)
+            result = total_log_prob.to(self.device)
+            logger.debug(f"🔍 Reference model: {len(generated_tokens)} tokens, total_log_prob={result:.4f}")
             return result
 
+    def calculate_discounted_returns(self, rewards: List[float], gamma: float = None) -> torch.Tensor:
+        """할인된 리턴 계산 (CartPole GRPO 방식)"""
+        if gamma is None:
+            gamma = self.grpo_config.gamma
+        
+        returns = torch.zeros(len(rewards), device=self.device, dtype=torch.float32)
+        discounted_return = 0.0
+        
+        # 역순으로 할인된 리턴 계산
+        for t in reversed(range(len(rewards))):
+            discounted_return = rewards[t] + gamma * discounted_return
+            returns[t] = discounted_return
+        
+        return returns
+    
+    def calculate_normalized_advantages(self, all_returns: torch.Tensor) -> torch.Tensor:
+        """전체 그룹에 대한 정규화 (CartPole GRPO 방식)"""
+        if len(all_returns) <= 1:
+            return all_returns
+        
+        mean_return = torch.mean(all_returns)
+        std_return = torch.std(all_returns)
+        
+        # 정규화
+        normalized_advantages = (all_returns - mean_return) / (std_return + self.grpo_config.epsilon_std)
+        return normalized_advantages
+
     def update_grpo_policy(self, experiences: List[Dict]) -> Dict:
-        """GRPO 정책 업데이트 (QWEN 직접 학습)"""
+        """GRPO 정책 업데이트 (CartPole GRPO 호환)"""
         if not experiences:
             return {}
         
@@ -609,26 +787,26 @@ class QWENModel:
         
         # 텐서로 변환 (gradient 계산을 위해 float32 사용)
         old_log_probs = torch.stack(old_log_probs)
-        rewards = torch.tensor(rewards, device=self.device, dtype=torch.float32)
         
-        # Group-relative advantage 사용 (main.py에서 계산됨) - 단일 GPU 모드
-        advantages = []
-        for exp in experiences:
-            if 'group_advantage' in exp:
-                advantages.append(exp['group_advantage'])
-            else:
-                # fallback: 기존 방식
-                advantages.append(exp['reward'] - rewards.mean().item())
+        # 할인된 리턴 계산 (CartPole GRPO 방식)
+        discounted_returns = self.calculate_discounted_returns(rewards)
         
-        advantages = torch.tensor(advantages, device=self.device, dtype=torch.float32)
+        # 정규화된 advantage 계산 (CartPole GRPO 방식)
+        advantages = self.calculate_normalized_advantages(discounted_returns)
         
-        baseline = rewards.mean()  # 로깅용
+        logger.info(f"📊 할인된 리턴 통계:")
+        logger.info(f"  원본 리워드: mean={sum(rewards)/len(rewards):.4f}, std={torch.tensor(rewards).std():.4f}")
+        logger.info(f"  할인된 리턴: mean={discounted_returns.mean():.4f}, std={discounted_returns.std():.4f}")
+        logger.info(f"  정규화된 advantage: mean={advantages.mean():.4f}, std={advantages.std():.4f}")
+        
+        baseline = sum(rewards) / len(rewards)  # 로깅용
         
         # 현재 모델과 참조 모델의 로그 확률 계산 (gradient 계산 필요)
         current_log_probs = []
         ref_log_probs = []
         
-        for user_prompt, enhanced_prompt in zip(user_prompts, enhanced_prompts):
+        logger.info("🔍 로그 확률 계산 중...")
+        for i, (user_prompt, enhanced_prompt) in enumerate(zip(user_prompts, enhanced_prompts)):
             # 현재 모델의 로그 확률 계산 (gradient 필요)
             current_log_prob = self.calculate_log_prob_for_grpo(user_prompt, enhanced_prompt)
             current_log_probs.append(current_log_prob)
@@ -636,27 +814,108 @@ class QWENModel:
             # 참조 모델의 로그 확률 (gradient 불필요)
             ref_log_prob = self.get_ref_model_log_prob(user_prompt, enhanced_prompt)
             ref_log_probs.append(ref_log_prob)
+            
+            logger.info(f"  경험 {i+1}: current_log_prob={current_log_prob:.4f}, ref_log_prob={ref_log_prob:.4f}")
         
         current_log_probs = torch.stack(current_log_probs)
         ref_log_probs = torch.stack(ref_log_probs)
         
-        # 중요도 비율 계산
-        ratio = torch.exp(current_log_probs - old_log_probs)
+        logger.info(f"📊 로그 확률 통계:")
+        logger.info(f"  Current log probs: mean={current_log_probs.mean():.4f}, std={current_log_probs.std():.4f}")
+        logger.info(f"  Ref log probs: mean={ref_log_probs.mean():.4f}, std={ref_log_probs.std():.4f}")
+        logger.info(f"  Old log probs: mean={old_log_probs.mean():.4f}, std={old_log_probs.std():.4f}")
+        logger.info(f"  Advantages: mean={advantages.mean():.4f}, std={advantages.std():.4f}")
+        
+        # 중요도 비율 계산 - 안전한 계산
+        log_ratio = current_log_probs - old_log_probs
+        
+        logger.info(f"🔍 중요도 비율 계산:")
+        logger.info(f"  Log ratio: mean={log_ratio.mean():.6f}, std={log_ratio.std():.6f}")
+        
+        # 안전성 검사
+        if torch.isnan(log_ratio).any() or torch.isinf(log_ratio).any():
+            logger.warning("⚠️ Log ratio에 nan/inf 발견, 클리핑 적용")
+            log_ratio = torch.clamp(log_ratio, min=-10, max=10)
+        
+        ratio = torch.exp(log_ratio)
+        logger.info(f"  Ratio: mean={ratio.mean():.6f}, std={ratio.std():.6f}")
+        
+        # ratio 안전성 검사
+        if torch.isnan(ratio).any() or torch.isinf(ratio).any():
+            logger.warning("⚠️ Ratio에 nan/inf 발견, 안전한 값으로 대체")
+            ratio = torch.clamp(ratio, min=0.1, max=10.0)
         
         # PPO 클립된 목적 함수
         clipped_ratio = torch.clamp(ratio, 1 - self.grpo_config.clip_ratio, 1 + self.grpo_config.clip_ratio)
-        policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
+        logger.info(f"  Clipped ratio: mean={clipped_ratio.mean():.6f}, std={clipped_ratio.std():.6f}")
         
-        # KL 발산 페널티 (단일 GPU 모드 - Reference model 항상 있음)
+        # 정책 손실 계산
+        policy_obj1 = ratio * advantages
+        policy_obj2 = clipped_ratio * advantages
+        
+        # 안전성 검사 - 0으로 설정하지 말고 작은 값으로 설정
+        if torch.isnan(policy_obj1).any() or torch.isinf(policy_obj1).any():
+            logger.warning("⚠️ Policy objective 1에 nan/inf 발견, 작은 값으로 대체")
+            policy_obj1 = advantages * 0.01  # 작은 신호 유지
+            
+        if torch.isnan(policy_obj2).any() or torch.isinf(policy_obj2).any():
+            logger.warning("⚠️ Policy objective 2에 nan/inf 발견, 작은 값으로 대체")
+            policy_obj2 = advantages * 0.01  # 작은 신호 유지
+        
+        policy_loss = -torch.min(policy_obj1, policy_obj2).mean()
+        
+        logger.info(f"🔍 정책 손실 계산:")
+        logger.info(f"  Policy objective 1 mean: {policy_obj1.mean():.6f}")
+        logger.info(f"  Policy objective 2 mean: {policy_obj2.mean():.6f}")
+        logger.info(f"  Policy loss: {policy_loss:.6f}")
+        
+        # KL 발산 페널티 (CartPole GRPO 정확한 방식)
         if self.ref_model is not None:
-            kl_div = (current_log_probs - ref_log_probs).mean()
+            # 정확한 KL divergence 추정기 (CartPole GRPO 방식)
+            with torch.no_grad():
+                log_ratio_ref_curr = ref_log_probs - current_log_probs.detach()
+            
+            # KL(ref || current) = exp(log_ratio) - log_ratio - 1
+            kl_div_estimate = torch.exp(log_ratio_ref_curr) - log_ratio_ref_curr - 1
+            kl_div = torch.relu(kl_div_estimate.mean())  # 음수 방지
+            
+            # KL divergence 안전성 검사
+            if torch.isnan(kl_div) or torch.isinf(kl_div):
+                logger.warning("⚠️ KL divergence에 nan/inf 발견, 안전한 값으로 대체")
+                kl_div = torch.tensor(0.01, device=self.device)  # 작은 값으로 변경
+            
             kl_penalty = self.grpo_config.kl_coef * kl_div
+            logger.info(f"  KL divergence (정확한 추정): {kl_div:.6f}")
+            logger.info(f"  KL penalty: {kl_penalty:.6f}")
         else:
             kl_div = torch.tensor(0.0, device=self.device)
             kl_penalty = torch.tensor(0.0, device=self.device)
+            logger.info("  Reference model 없음, KL penalty = 0")
         
-        # 총 손실 (엔트로피는 QWEN 자체에서 제공)
-        total_loss = policy_loss + kl_penalty
+        # 엔트로피 보너스 계산 (CartPole GRPO 방식)
+        # 현재 정책의 엔트로피 추정 (로그 확률의 분산 기반)
+        entropy_estimate = current_log_probs.var()
+        entropy_bonus = self.grpo_config.entropy_coef * entropy_estimate
+        
+        # 총 손실 (정책 손실 + KL 페널티 - 엔트로피 보너스)
+        total_loss = policy_loss + kl_penalty - entropy_bonus
+        
+        logger.info(f"  Entropy estimate: {entropy_estimate:.6f}")
+        logger.info(f"  Entropy bonus: {entropy_bonus:.6f}")
+        logger.info(f"  Total loss: {total_loss:.6f}")
+        
+        # 최종 손실 안전성 검사
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            logger.error("🚨 총 손실에 nan/inf 발견! 학습 건너뛰기")
+            return {
+                'policy_loss': 0.0,
+                'kl_div': 0.0,
+                'total_loss': 0.0,
+                'mean_reward': rewards.mean().item(),
+                'baseline': baseline.item(),
+                'mean_advantage': advantages.mean().item(),
+                'error': 'nan_inf_in_loss'
+            }
         
         # 역전파
         self.grpo_optimizer.zero_grad()
@@ -668,9 +927,11 @@ class QWENModel:
         metrics = {
             'policy_loss': policy_loss.item(),
             'kl_div': kl_div.item(),
+            'entropy': entropy_estimate.item(),
+            'entropy_bonus': entropy_bonus.item(),
             'total_loss': total_loss.item(),
-            'mean_reward': rewards.mean().item(),
-            'baseline': baseline.item(),
+            'mean_reward': sum(rewards) / len(rewards),
+            'baseline': baseline,
             'mean_advantage': advantages.mean().item()
         }
         
@@ -681,6 +942,49 @@ class QWENModel:
             torch.cuda.empty_cache()
         
         return metrics
+    
+    def update_grpo_policy_multiple_epochs(self, experiences: List[Dict]) -> Dict:
+        """다중 에포크 GRPO 업데이트 (CartPole GRPO 방식)"""
+        if not experiences:
+            return {}
+        
+        num_epochs = self.grpo_config.grpo_epochs
+        logger.info(f"🔄 다중 에포크 GRPO 업데이트 시작 ({num_epochs} 에포크)")
+        
+        # 누적 메트릭
+        total_policy_loss = 0.0
+        total_kl_div = 0.0
+        total_entropy = 0.0
+        
+        for epoch in range(num_epochs):
+            logger.info(f"  에포크 {epoch + 1}/{num_epochs}")
+            
+            # 단일 에포크 업데이트
+            metrics = self.update_grpo_policy(experiences)
+            
+            # 메트릭 누적
+            total_policy_loss += metrics.get('policy_loss', 0.0)
+            total_kl_div += metrics.get('kl_div', 0.0)
+            total_entropy += metrics.get('entropy', 0.0)
+            
+            logger.info(f"    Policy loss: {metrics.get('policy_loss', 0.0):.6f}")
+            logger.info(f"    KL div: {metrics.get('kl_div', 0.0):.6f}")
+            logger.info(f"    Entropy: {metrics.get('entropy', 0.0):.6f}")
+        
+        # 평균 메트릭 계산
+        avg_metrics = {
+            'avg_policy_loss': total_policy_loss / num_epochs,
+            'avg_kl_div': total_kl_div / num_epochs,
+            'avg_entropy': total_entropy / num_epochs,
+            'num_epochs': num_epochs,
+            'total_experiences': len(experiences)
+        }
+        
+        logger.info(f"✅ 다중 에포크 업데이트 완료")
+        logger.info(f"  평균 Policy loss: {avg_metrics['avg_policy_loss']:.6f}")
+        logger.info(f"  평균 KL div: {avg_metrics['avg_kl_div']:.6f}")
+        
+        return avg_metrics
 
     def _post_process_output(self, raw_output):
         """생성된 출력 후처리"""
@@ -704,6 +1008,16 @@ class QWENModel:
             results.append(result)
         return results
 
+    def update_reference_model(self):
+        """매 iteration마다 현재 모델을 reference로 복사 (CartPole GRPO 방식)"""
+        if self.ref_model is not None:
+            logger.info("🔄 Reference 모델 업데이트 중...")
+            self.ref_model.load_state_dict(self.model.state_dict())
+            self.ref_model.eval()
+            logger.info("✅ Reference 모델 업데이트 완료")
+        else:
+            logger.warning("⚠️ Reference 모델이 없어 업데이트 건너뛰기")
+    
     def move_ref_model_to_device(self, device: str):
         """Reference 모델을 지정된 디바이스로 이동 (전체 학습에서는 비활성화)"""
         if self.ref_model is not None:
