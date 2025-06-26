@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QWENGRPOConfig:
-    """QWEN GRPO 통합 설정 (CartPole GRPO 호환)"""
+    """QWEN GRPO 통합 설정 (CartPole GRPO 호환 + EasyR1 안정성)"""
     learning_rate: float = 2e-4  # LoRA는 더 높은 학습률 사용 가능
     batch_size: int = 2  # 메모리 절약을 위해 배치 크기 감소 (8 → 2)
     num_rollouts: int = 2  # 메모리 절약을 위해 롤아웃 수 감소 (6 → 2)
@@ -33,6 +33,17 @@ class QWENGRPOConfig:
     grpo_epochs: int = 10  # 다중 에포크 업데이트
     update_ref_model_freq: int = 1  # Reference 모델 업데이트 빈도
     epsilon_std: float = 1e-8  # 정규화 안정성
+    
+    # EasyR1 스타일 수치적 안정성 설정
+    use_adaptive_grad_clip: bool = True  # 적응적 그래디언트 클리핑
+    grad_clip_ema_beta: float = 0.99  # 그래디언트 norm EMA 계수
+    grad_clip_coef: float = 1.5  # 적응적 클리핑 계수
+    use_grad_centralization: bool = True  # 그래디언트 중앙화
+    use_grad_normalization: bool = True  # 그래디언트 정규화
+    grad_norm_alpha: float = 0.5  # 정규화 강도
+    use_stochastic_rounding: bool = True  # 확률적 반올림 (시뮬레이션)
+    logits_clip_range: float = 20.0  # logits 클리핑 범위 (더 보수적으로)
+    stable_log_prob_min: float = -50.0  # 안전한 로그 확률 최소값
 
 class QWENModel:
 
@@ -239,13 +250,23 @@ class QWENModel:
             weight_decay=0.01
         )
         
+        # EasyR1 스타일 수치적 안정성 변수 초기화
+        self.grad_norm_ema = 0.0  # 그래디언트 norm의 지수 이동 평균
+        self.training_step = 0  # 트레이닝 스텝 카운터
+        
         # 메모리 정리
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             logger.info("🧹 GPU 메모리 캐시 정리 완료")
         
-        logger.info("✅ GRPO 컴포넌트 초기화 완료 (메모리 최적화)")
+        logger.info("✅ GRPO 컴포넌트 초기화 완료 (메모리 최적화 + EasyR1 안정성)")
         logger.info(f"📊 QWEN 모델 직접 학습 방식으로 설정")
+        logger.info(f"🔧 EasyR1 안정성 기법:")
+        logger.info(f"  - 적응적 그래디언트 클리핑: {self.grpo_config.use_adaptive_grad_clip}")
+        logger.info(f"  - 그래디언트 중앙화: {self.grpo_config.use_grad_centralization}")
+        logger.info(f"  - 확률적 반올림: {self.grpo_config.use_stochastic_rounding}")
+        logger.info(f"  - Logits 클리핑 범위: ±{self.grpo_config.logits_clip_range}")
+        logger.info(f"  - 안전한 로그 확률 최소값: {self.grpo_config.stable_log_prob_min}")
 
     def _init_grpo_weights(self):
         """GRPO 가중치 초기화 (QWEN 직접 학습 방식에서는 불필요)"""
@@ -622,10 +643,23 @@ class QWENModel:
             # logits[i]는 token[i+1]을 예측하므로, prompt_length-1부터 시작
             generated_logits = outputs.logits[0, prompt_length-1:prompt_length-1+len(generated_tokens)]
             
-            # 안전성 검사
+            # EasyR1 스타일 안전성 검사 - 더 보수적인 클리핑
             if torch.isnan(generated_logits).any() or torch.isinf(generated_logits).any():
-                logger.warning("⚠️ Generated logits에 nan/inf 발견, 클리핑 적용")
-                generated_logits = torch.clamp(generated_logits, min=-100, max=100)
+                logger.warning("⚠️ Generated logits에 nan/inf 발견, EasyR1 스타일 클리핑 적용")
+                generated_logits = torch.clamp(generated_logits, 
+                                               min=-self.grpo_config.logits_clip_range, 
+                                               max=self.grpo_config.logits_clip_range)
+            else:
+                # 예방적 클리핑 (EasyR1 스타일)
+                generated_logits = torch.clamp(generated_logits, 
+                                               min=-self.grpo_config.logits_clip_range, 
+                                               max=self.grpo_config.logits_clip_range)
+            
+            # 확률적 반올림 시뮬레이션 (EasyR1 스타일)
+            if self.grpo_config.use_stochastic_rounding and self.training:
+                # 작은 노이즈 추가로 stochastic rounding 효과 시뮬레이션
+                noise = torch.randn_like(generated_logits) * 1e-6
+                generated_logits = generated_logits + noise
             
             # 각 토큰에 대한 로그 확률 계산 (gradient 유지)
             log_probs = F.log_softmax(generated_logits, dim=-1)
@@ -713,10 +747,17 @@ class QWENModel:
             # 생성된 토큰에 대응하는 logits (shift by 1)
             generated_logits = outputs.logits[0, prompt_length-1:prompt_length-1+len(generated_tokens)]
             
-            # 안전한 로그 확률 계산
+            # EasyR1 스타일 안전한 로그 확률 계산
             if torch.isnan(generated_logits).any() or torch.isinf(generated_logits).any():
-                logger.warning("⚠️ Reference model logits에 nan/inf 발견, 클리핑 적용")
-                generated_logits = torch.clamp(generated_logits, min=-100, max=100)
+                logger.warning("⚠️ Reference model logits에 nan/inf 발견, EasyR1 스타일 클리핑 적용")
+                generated_logits = torch.clamp(generated_logits, 
+                                               min=-self.grpo_config.logits_clip_range, 
+                                               max=self.grpo_config.logits_clip_range)
+            else:
+                # 예방적 클리핑 (EasyR1 스타일)
+                generated_logits = torch.clamp(generated_logits, 
+                                               min=-self.grpo_config.logits_clip_range, 
+                                               max=self.grpo_config.logits_clip_range)
             
             log_probs = F.log_softmax(generated_logits, dim=-1)
             
@@ -920,7 +961,29 @@ class QWENModel:
         # 역전파
         self.grpo_optimizer.zero_grad()
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        
+        # EasyR1 스타일 그래디언트 안정성 기법 적용
+        self.training_step += 1
+        
+        # 1. 그래디언트 중앙화 (Gradient Centralization)
+        if self.grpo_config.use_grad_centralization:
+            self._apply_gradient_centralization()
+        
+        # 2. 그래디언트 정규화 (Adaptive Gradient Normalization)
+        if self.grpo_config.use_grad_normalization:
+            self._apply_gradient_normalization()
+        
+        # 3. 적응적 그래디언트 클리핑 (AdaGC)
+        if self.grpo_config.use_adaptive_grad_clip:
+            grad_norm = self._apply_adaptive_gradient_clipping()
+        else:
+            # 기본 그래디언트 클리핑
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        
+        logger.info(f"🔧 그래디언트 처리:")
+        logger.info(f"  - 그래디언트 norm: {grad_norm:.6f}")
+        logger.info(f"  - 적응적 클리핑 임계값: {self.grad_norm_ema * self.grpo_config.grad_clip_coef:.6f}")
+        
         self.grpo_optimizer.step()
         
         # 메트릭 저장 (메모리 정리 전에)
@@ -1057,3 +1120,55 @@ class QWENModel:
             'all_params': all_param,
             'trainable_percentage': 100 * trainable_params / all_param
         }
+    
+    def _apply_gradient_centralization(self):
+        """그래디언트 중앙화 (EasyR1 스타일)"""
+        for param in self.model.parameters():
+            if param.grad is not None and param.grad.dim() > 1:
+                # 그래디언트의 평균을 빼서 중앙화
+                grad_mean = param.grad.mean(dim=tuple(range(1, param.grad.dim())), keepdim=True)
+                param.grad = param.grad - grad_mean
+    
+    def _apply_gradient_normalization(self):
+        """적응적 그래디언트 정규화 (EasyR1 스타일)"""
+        alpha = self.grpo_config.grad_norm_alpha
+        
+        for param in self.model.parameters():
+            if param.grad is not None:
+                grad = param.grad
+                grad_std = grad.std()
+                
+                # 표준편차가 0이 아닐 때만 정규화 적용
+                if grad_std > 1e-8:
+                    normalized_grad = grad / (grad_std + 1e-8)
+                    param.grad = (1 - alpha) * grad + alpha * normalized_grad
+    
+    def _apply_adaptive_gradient_clipping(self) -> float:
+        """적응적 그래디언트 클리핑 (AdaGC 스타일)"""
+        # 현재 그래디언트 norm 계산
+        grad_norm = 0.0
+        for param in self.model.parameters():
+            if param.grad is not None:
+                grad_norm += param.grad.data.norm().item() ** 2
+        grad_norm = grad_norm ** 0.5
+        
+        # 지수 이동 평균 업데이트
+        if self.grad_norm_ema == 0.0:
+            self.grad_norm_ema = grad_norm
+        else:
+            beta = self.grpo_config.grad_clip_ema_beta
+            self.grad_norm_ema = beta * self.grad_norm_ema + (1 - beta) * grad_norm
+        
+        # 적응적 클리핑 임계값 계산
+        clip_threshold = self.grpo_config.grad_clip_coef * self.grad_norm_ema
+        
+        # 클리핑 적용
+        if grad_norm > clip_threshold:
+            clip_coef = clip_threshold / (grad_norm + 1e-8)
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    param.grad.data.mul_(clip_coef)
+            
+            logger.info(f"🔧 적응적 그래디언트 클리핑 적용: {grad_norm:.6f} -> {clip_threshold:.6f}")
+        
+        return grad_norm
